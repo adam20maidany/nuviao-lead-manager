@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Best Buy Remodel - Lead Manager Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .status-new { @apply bg-blue-100 text-blue-800; }
+        .status-follow_up { @apply bg-yellow-100 text-yellow-800; }
+        .status-booked { @apply bg-green-100 text-green-800; }
+        .status-dead { @apply bg-red-100 text-red-800; }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- Header -->
+    <header class="bg-white shadow-sm border-b">
+        <div class="max-w-7xl mx-auto px-4 py-4">
+            <div class="flex justify-between items-center">
+                <h1 class="text-2xl font-bold text-gray-900">Best Buy Remodel - Lead Manager</h1>
+                <div class="text-sm text-gray-600">
+                    <span class="font-medium">Webhook URL:</span>
+                    <code class="bg-gray-100 px-2 py-1 rounded text-xs" id="webhookUrl">Loading...</code>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Dashboard -->
+    <main class="max-w-7xl mx-auto px-4 py-8">
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="bg-white rounded-lg shadow p-6">
+                <h3 class="text-sm font-medium text-gray-600">Total Leads</h3>
+                <p class="text-2xl font-bold text-gray-900" id="totalLeads">0</p>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <h3 class="text-sm font-medium text-gray-600">Today's Calls</h3>
+                <p class="text-2xl font-bold text-gray-900" id="todaysCalls">0</p>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <h3 class="text-sm font-medium text-gray-600">Appointments</h3>
+                <p class="text-2xl font-bold text-gray-900" id="appointments">0</p>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <h3 class="text-sm font-medium text-gray-600">Conversion Rate</h3>
+                <p class="text-2xl font-bold text-gray-900" id="conversionRate">0%</p>
+            </div>
+        </div>
+
+        <!-- Recent Leads Table -->
+        <div class="bg-white rounded-lg shadow mb-8">
+            <div class="px-6 py-4 border-b">
+                <h3 class="text-lg font-medium text-gray-900">Recent Leads</h3>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contact</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Project</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="leadsTable" class="bg-white divide-y divide-gray-200">
+                        <tr>
+                            <td colspan="5" class="px-6 py-4 text-center text-gray-500">
+                                No leads yet. Send a test lead to get started!
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Test Section -->
+        <div class="bg-blue-50 rounded-lg p-6">
+            <h3 class="text-lg font-medium text-blue-900 mb-4">Test Your System</h3>
+            <button onclick="sendTestLead()" class="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700">
+                Send Test Lead
+            </button>
+        </div>
+    </main>
+
+    <script>
+        // Set webhook URL
+        document.addEventListener('DOMContentLoaded', function() {
+            const webhookUrl = `${window.location.origin}/webhook/leads/bestbuyremodel`;
+            document.getElementById('webhookUrl').textContent = webhookUrl;
+            loadDashboard();
+        });
+
+        // Load dashboard data
+        async function loadDashboard() {
+            try {
+                const response = await fetch('/api/dashboard/stats');
+                const data = await response.json();
+                
+                document.getElementById('totalLeads').textContent = data.total_leads || 0;
+                document.getElementById('todaysCalls').textContent = data.calls_today || 0;
+                document.getElementById('appointments').textContent = data.bookings_today || 0;
+                document.getElementById('conversionRate').textContent = `${data.conversion_rate || 0}%`;
+                
+                updateLeadsTable(data.recent_leads || []);
+                
+            } catch (error) {
+                console.error('Failed to load dashboard:', error);
+            }
+        }
+
+        // Update leads table
+        function updateLeadsTable(leads) {
+            const tbody = document.getElementById('leadsTable');
+            
+            if (leads.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="5" class="px-6 py-4 text-center text-gray-500">
+                            No leads yet. Send a test lead to get started!
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = leads.map(lead => {
+                const projectType = lead.custom_fields?.project_type || 'General';
+                const createdAt = new Date(lead.created_at).toLocaleDateString();
+                
+                return `
+                    <tr class="hover:bg-gray-50">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm font-medium text-gray-900">${lead.name}</div>
+                            <div class="text-sm text-gray-500">${lead.phone}</div>
+                        </td>
+                        <td class="px-6 py-4 text-sm text-gray-900">${projectType}</td>
+                        <td class="px-6 py-4 text-sm text-gray-900">${lead.source}</td>
+                        <td class="px-6 py-4">
+                            <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full status-${lead.status}">
+                                ${lead.status.replace('_', ' ')}
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 text-sm text-gray-500">${createdAt}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        // Send test lead
+        async function sendTestLead() {
+            try {
+                const testLead = {
+                    name: 'John Smith',
+                    phone: '555-123-4567',
+                    email: 'john@example.com',
+                    source: 'test',
+                    project_type: 'kitchen remodel',
+                    message: 'Looking for a kitchen renovation estimate'
+                };
+
+                const response = await fetch('/webhook/leads/bestbuyremodel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(testLead)
+                });
+
+                if (response.ok) {
+                    alert('✅ Test lead sent successfully!');
+                    setTimeout(loadDashboard, 2000);
+                } else {
+                    alert('❌ Failed to send test lead');
+                }
+            } catch (error) {
+                alert('❌ Error sending test lead');
+            }
+        }
+    </script>
+</body>
+</html>
