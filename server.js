@@ -1,33 +1,21 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Debug environment variables
-console.log('🔍 Environment check:');
-console.log('SUPABASE_URL:', process.env.SUPABASE_URL ? 'SET' : 'MISSING');
-console.log('SUPABASE_ANON_KEY:', process.env.SUPABASE_ANON_KEY ? 'SET' : 'MISSING');
+// Debug ALL environment variables
+console.log('🔍 All Environment Variables:');
+console.log('PORT:', process.env.PORT);
+console.log('NODE_ENV:', process.env.NODE_ENV);
+console.log('SUPABASE_URL exists:', !!process.env.SUPABASE_URL);
+console.log('SUPABASE_ANON_KEY exists:', !!process.env.SUPABASE_ANON_KEY);
 
 // Basic middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
-
-// Initialize Supabase only if environment variables exist
-let supabase = null;
-if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
-  const { createClient } = require('@supabase/supabase-js');
-  supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_ANON_KEY
-  );
-  console.log('✅ Supabase initialized');
-} else {
-  console.log('⚠️ Supabase not initialized - missing environment variables');
-}
 
 // Health check
 app.get('/health', (req, res) => {
@@ -35,54 +23,62 @@ app.get('/health', (req, res) => {
     status: 'healthy', 
     timestamp: new Date().toISOString(),
     service: 'Nuviao AI Lead Manager',
-    supabase_connected: !!supabase
+    env_vars: {
+      supabase_url: !!process.env.SUPABASE_URL,
+      supabase_key: !!process.env.SUPABASE_ANON_KEY
+    }
   });
 });
 
-// Simple webhook for testing
-app.post('/webhook/leads/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('📞 Lead received:', req.body);
-    
-    if (supabase) {
-      // Try to save to database
-      const { data, error } = await supabase
-        .from('leads')
-        .insert({
-          client_id: 1,
-          name: req.body.name || 'Test Lead',
-          phone: req.body.phone || '555-123-4567',
-          email: req.body.email,
-          source: req.body.source || 'webhook',
-          status: 'new'
-        })
-        .select()
-        .single();
-      
-      if (error) {
-        console.error('Database error:', error);
-        return res.json({ success: true, message: 'Lead received but not saved to database', error: error.message });
-      }
-      
-      console.log('✅ Lead saved to database:', data.id);
-      res.json({ success: true, message: 'Lead received and saved!', lead_id: data.id });
-    } else {
-      res.json({ success: true, message: 'Lead received (database not connected)' });
-    }
-    
-  } catch (error) {
-    console.error('Webhook error:', error);
-    res.json({ success: false, error: error.message });
-  }
+// Simple webhook (no database for now)
+app.post('/webhook/leads/bestbuyremodel', (req, res) => {
+  console.log('📞 Lead received:', req.body);
+  res.json({ 
+    success: true, 
+    message: 'Lead received successfully!',
+    lead_data: req.body
+  });
 });
 
-// Serve dashboard
+// Simple dashboard
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.send(`
+    <html>
+      <head><title>Best Buy Remodel - Lead Manager</title></head>
+      <body style="font-family: Arial; padding: 20px;">
+        <h1>🏠 Best Buy Remodel - Lead Manager</h1>
+        <p><strong>Status:</strong> ✅ System Online</p>
+        <p><strong>Webhook URL:</strong> <code>${req.protocol}://${req.get('host')}/webhook/leads/bestbuyremodel</code></p>
+        
+        <h2>Test Your Webhook:</h2>
+        <button onclick="sendTest()">Send Test Lead</button>
+        <div id="result"></div>
+        
+        <script>
+          async function sendTest() {
+            try {
+              const response = await fetch('/webhook/leads/bestbuyremodel', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                  name: 'John Smith',
+                  phone: '555-123-4567',
+                  email: 'john@example.com',
+                  project_type: 'kitchen remodel'
+                })
+              });
+              const result = await response.json();
+              document.getElementById('result').innerHTML = '<p style="color: green;">✅ ' + result.message + '</p>';
+            } catch (error) {
+              document.getElementById('result').innerHTML = '<p style="color: red;">❌ Error: ' + error.message + '</p>';
+            }
+          }
+        </script>
+      </body>
+    </html>
+  `);
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📊 Dashboard: Visit your Railway URL`);
-  console.log(`🎯 Webhook: Visit your Railway URL/webhook/leads/bestbuyremodel`);
 });
