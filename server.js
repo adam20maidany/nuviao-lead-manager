@@ -39,7 +39,7 @@ async function initiateAICall(lead) {
 
     console.log(`📞 Initiating AI call for ${lead.name} at ${lead.phone}`);
     
-    const response = await axios.post('https://api.retellai.com/create-phone-call', {
+    const response = await axios.post('https://api.retellai.com/v2/create-phone-call', {
       from_number: '+17252092232',
       to_number: lead.phone,
       agent_id: process.env.RETELL_AGENT_ID,
