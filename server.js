@@ -12,6 +12,8 @@ console.log('🔍 Environment check:');
 console.log('SUPABASE_URL exists:', !!process.env.SUPABASE_URL);
 console.log('RETELL_API_KEY exists:', !!process.env.RETELL_API_KEY);
 console.log('RETELL_AGENT_ID exists:', !!process.env.RETELL_AGENT_ID);
+console.log('GHL_API_KEY exists:', !!process.env.GHL_API_KEY);
+console.log('GHL_LOCATION_ID exists:', !!process.env.GHL_LOCATION_ID);
 
 // Initialize Supabase
 let supabase = null;
@@ -30,17 +32,17 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// GHL BRIDGE WEBHOOK - ALL IN ONE
+// GHL BRIDGE WEBHOOK - WITH API CONTACT CREATION
 app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
   try {
     console.log('🔗 GHL Bridge received data:', req.body);
     
-    // Extract lead data from GHL
+    // Extract lead data
     const leadData = {
       name: req.body.full_name || req.body.firstName + ' ' + req.body.lastName || 'Unknown',
       phone: req.body.phone,
       email: req.body.email,
-      source: 'ghl',
+      source: req.body.source || 'ghl',
       ghl_contact_id: req.body.contact_id || req.body.id
     };
 
@@ -54,99 +56,150 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
 
     console.log(`📞 Processing lead: ${leadData.name} - ${leadData.phone}`);
 
-    // Save lead to Supabase (if available)
+    // Step 1: Save lead to Railway database
     let savedLead = null;
     if (global.supabase) {
       try {
         const { data, error } = await global.supabase
           .from('leads')
           .insert({
-            client_id: 1, // Best Buy Remodel
+            client_id: 1,
             name: leadData.name,
             phone: leadData.phone,
             email: leadData.email,
             source: leadData.source,
             status: 'new',
             custom_fields: {
-              ghl_contact_id: leadData.ghl_contact_id
+              original_ghl_contact_id: leadData.ghl_contact_id
             }
           })
           .select()
           .single();
 
-        if (error) {
+        if (error && error.code !== '23505') { // Ignore duplicate key errors
           console.error('Database error:', error);
-        } else {
+        } else if (data) {
           savedLead = data;
-          console.log(`✅ Lead saved to database: ID ${savedLead.id}`);
+          console.log(`✅ Lead saved to Railway database: ID ${savedLead.id}`);
         }
       } catch (dbError) {
         console.error('Database save failed:', dbError);
       }
     }
 
-    // Initiate AI call via Retell
-    let callResult = { success: false, error: 'Retell not configured' };
-    
-    if (process.env.RETELL_API_KEY && process.env.RETELL_AGENT_ID) {
-      try {
-        console.log(`📞 Calling Retell AI for ${leadData.name} at ${leadData.phone}`);
-        
-        const response = await axios.post('https://api.retellai.com/v2/create-phone-call', {
-          from_number: '+17252092232',
-          to_number: leadData.phone,
-          agent_id: process.env.RETELL_AGENT_ID,
-          metadata: {
-            lead_id: savedLead?.id,
-            ghl_contact_id: leadData.ghl_contact_id,
-            first_name: leadData.name.split(' ')[0],
-            full_name: leadData.name,
-            phone: leadData.phone,
-            email: leadData.email || ''
-          }
-        }, {
-          headers: {
-            'Authorization': `Bearer ${process.env.RETELL_API_KEY}`,
-            'Content-Type': 'application/json'
-          }
-        });
-
-        callResult = { 
-          success: true, 
-          call_id: response.data.call_id 
-        };
-        console.log(`✅ AI call initiated successfully: ${response.data.call_id}`);
-
-      } catch (error) {
-        callResult = { 
-          success: false, 
-          error: error.response?.data || error.message 
-        };
-        console.error(`❌ AI call failed:`, callResult.error);
-      }
+    // Step 2: Create GHL contact via API
+    let ghlContact = null;
+    if (process.env.GHL_API_KEY && process.env.GHL_LOCATION_ID) {
+      ghlContact = await createGHLContact(leadData);
     }
+
+    // Step 3: Initiate AI call via Retell
+    const callResult = await initiateAICall(leadData, savedLead?.id, ghlContact?.contact?.id);
     
-    if (callResult.success) {
-      res.json({ 
-        success: true, 
-        message: 'Lead processed and AI call initiated',
-        lead_id: savedLead?.id,
-        call_id: callResult.call_id
-      });
-    } else {
-      res.json({ 
-        success: false, 
-        message: 'Lead saved but AI call failed',
-        lead_id: savedLead?.id,
-        error: callResult.error
-      });
-    }
+    // Step 4: Send response
+    res.json({ 
+      success: true, 
+      message: 'Lead processed, GHL contact created, and AI call initiated',
+      railway_lead_id: savedLead?.id,
+      ghl_contact_id: ghlContact?.contact?.id,
+      call_id: callResult.call_id,
+      ghl_contact_created: !!ghlContact
+    });
 
   } catch (error) {
     console.error('❌ GHL Bridge error:', error);
     res.status(500).json({ error: 'Failed to process GHL lead' });
   }
 });
+
+// Function to create GHL contact via API
+async function createGHLContact(leadData) {
+  try {
+    console.log(`📋 Creating GHL contact for ${leadData.name}`);
+
+    const nameParts = leadData.name.split(' ');
+    const contactData = {
+      firstName: nameParts[0] || '',
+      lastName: nameParts.slice(1).join(' ') || '',
+      phone: leadData.phone,
+      email: leadData.email || '',
+      source: leadData.source,
+      tags: ['AI Calling', 'Railway Import'],
+      locationId: process.env.GHL_LOCATION_ID
+    };
+
+    console.log('📤 Sending to GHL API:', contactData);
+
+    const response = await axios.post(
+      'https://services.leadconnectorhq.com/contacts/',
+      contactData,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Version': '2021-07-28',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    console.log(`✅ GHL contact created successfully: ${response.data.contact.id}`);
+    return response.data;
+
+  } catch (error) {
+    console.error('❌ GHL contact creation failed:', error.response?.data || error.message);
+    
+    // Log more details for debugging
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response data:', error.response.data);
+    }
+    
+    return null;
+  }
+}
+
+// Function to initiate AI call via Retell
+async function initiateAICall(leadData, railwayLeadId, ghlContactId) {
+  try {
+    if (!process.env.RETELL_API_KEY || !process.env.RETELL_AGENT_ID) {
+      return { success: false, error: 'Retell not configured' };
+    }
+
+    console.log(`📞 Calling Retell AI for ${leadData.name} at ${leadData.phone}`);
+    
+    const response = await axios.post('https://api.retellai.com/v2/create-phone-call', {
+      from_number: '+17252092232',
+      to_number: leadData.phone,
+      agent_id: process.env.RETELL_AGENT_ID,
+      metadata: {
+        railway_lead_id: railwayLeadId,
+        ghl_contact_id: ghlContactId,
+        first_name: leadData.name.split(' ')[0],
+        full_name: leadData.name,
+        phone: leadData.phone,
+        email: leadData.email || ''
+      }
+    }, {
+      headers: {
+        'Authorization': `Bearer ${process.env.RETELL_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log(`✅ AI call initiated successfully: ${response.data.call_id}`);
+    return { 
+      success: true, 
+      call_id: response.data.call_id 
+    };
+
+  } catch (error) {
+    console.error(`❌ AI call failed:`, error.response?.data || error.message);
+    return { 
+      success: false, 
+      error: error.response?.data || error.message 
+    };
+  }
+}
 
 // RETELL WEBHOOK
 app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
@@ -156,7 +209,6 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
     if (req.body.event_type === 'call_ended') {
       const { call_id, call_analysis } = req.body;
       
-      // Determine call outcome
       let outcome = 'no_answer';
       if (call_analysis?.summary) {
         const summary = call_analysis.summary.toLowerCase();
@@ -186,7 +238,9 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    service: 'Nuviao GHL-Railway Bridge'
+    service: 'Nuviao GHL-Railway Bridge',
+    ghl_api_configured: !!process.env.GHL_API_KEY,
+    location_id: process.env.GHL_LOCATION_ID
   });
 });
 
@@ -195,12 +249,13 @@ app.get('/', (req, res) => {
   res.send(`
     <h1>🚀 Nuviao GHL-Railway Bridge</h1>
     <p>Status: ✅ Online</p>
+    <p>GHL API: ${process.env.GHL_API_KEY ? '✅ Configured' : '❌ Not Configured'}</p>
+    <p>Location ID: ${process.env.GHL_LOCATION_ID || 'Not Set'}</p>
     <p>GHL Bridge Endpoint: <code>/webhook/ghl-bridge/bestbuyremodel</code></p>
-    <p>Health Check: <code>/health</code></p>
   `);
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 Nuviao Bridge running on port ${PORT}`);
-  console.log(`🎯 GHL Bridge ready at: /webhook/ghl-bridge/bestbuyremodel`);
+  console.log(`🎯 GHL Bridge ready with API contact creation!`);
 });
