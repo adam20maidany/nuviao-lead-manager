@@ -88,25 +88,46 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
 }
 
 async function getLocationCalendars() {
-  console.log('🔍 Trying multiple calendar endpoints...');
+  console.log('🔍 Getting calendars via locations endpoint...');
   
-  // Try different endpoints for Agency vs Location APIs
-  const endpoints = [
-    '/calendars/teams',           // Location API
-    '/calendars',                 // Generic calendars
-    `/locations/${LOCATION_ID}/calendars`,  // Location-specific
-    '/calendars/calendar',        // Alternative endpoint
+  // First, get all locations (this works!)
+  const locationsResult = await makeGHLRequest('/locations');
+  
+  if (!locationsResult.success) {
+    console.error('❌ Failed to get locations');
+    return [];
+  }
+  
+  console.log('✅ Got locations data:', locationsResult.data);
+  
+  // Find our specific location
+  const locations = locationsResult.data.locations || [locationsResult.data];
+  const targetLocation = locations.find(loc => loc.id === LOCATION_ID) || locations[0];
+  
+  if (!targetLocation) {
+    console.error('❌ Target location not found');
+    return [];
+  }
+  
+  console.log('🎯 Using location:', targetLocation.name, targetLocation.id);
+  
+  // Try location-specific calendar endpoints
+  const calendarEndpoints = [
+    `/locations/${targetLocation.id}/calendars`,
+    `/calendars?locationId=${targetLocation.id}`,
+    `/calendars/${targetLocation.id}`,
+    `/locations/${targetLocation.id}/calendar`,
   ];
   
-  for (const endpoint of endpoints) {
-    console.log(`🧪 Testing endpoint: ${endpoint}`);
+  for (const endpoint of calendarEndpoints) {
+    console.log(`🧪 Testing calendar endpoint: ${endpoint}`);
     const result = await makeGHLRequest(endpoint);
     
     if (result.success) {
-      console.log(`✅ Success with endpoint: ${endpoint}`);
-      return result.data.calendars || result.data.teams || result.data || [];
+      console.log(`✅ Success with: ${endpoint}`);
+      return result.data.calendars || result.data || [];
     } else {
-      console.log(`❌ Failed with ${endpoint}: ${result.error}`);
+      console.log(`❌ Failed: ${result.error}`);
     }
   }
   
