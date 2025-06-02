@@ -37,10 +37,11 @@ app.use(express.json({ limit: '10mb' }));
 // ================================
 
 const GHL_BASE_URL = 'https://rest.gohighlevel.com/v1';
+const LOCATION_ID = process.env.GHL_LOCATION_ID || process.env.LOCATION_ID || 'llj5AyvYH8kun6U6fX84';
 const BUSINESS_HOURS = {
   start: 9, // 9 AM
   end: 17,  // 5 PM
-  timezone: 'America/Los_Angeles' // Las Vegas timezone
+  timezone: 'America/Los_Vegas' // Las Vegas timezone
 };
 
 const APPOINTMENT_CONFIG = {
@@ -80,7 +81,7 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
 }
 
 async function getLocationCalendars() {
-  const result = await makeGHLRequest(`/locations/${process.env.GHL_LOCATION_ID}/calendars`);
+  const result = await makeGHLRequest(`/locations/${LOCATION_ID}/calendars`);
   
   if (result.success) {
     return result.data.calendars || [];
@@ -259,7 +260,7 @@ ${callSummary}
       description,
       startTime,
       endTime,
-      locationId: process.env.GHL_LOCATION_ID,
+      locationId: LOCATION_ID,
       contactId: appointmentData.contactId || null,
       appointmentStatus: 'confirmed'
     };
@@ -467,7 +468,7 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
 
     // Step 2: Create GHL contact via API
     let ghlContact = null;
-    if (process.env.GHL_API_KEY && process.env.GHL_LOCATION_ID) {
+    if (process.env.GHL_API_KEY && LOCATION_ID) {
       ghlContact = await createGHLContact(leadData);
     }
 
@@ -516,7 +517,7 @@ async function createGHLContact(leadData) {
       email: leadData.email || '',
       source: leadData.source,
       tags: ['AI Calling', 'Railway Import'],
-      locationId: process.env.GHL_LOCATION_ID
+      locationId: LOCATION_ID
     };
 
     console.log('📤 Sending to GHL API:', contactData);
@@ -636,7 +637,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     service: 'Nuviao GHL-Railway Bridge',
     ghl_api_configured: !!process.env.GHL_API_KEY,
-    location_id: process.env.GHL_LOCATION_ID,
+    location_id: LOCATION_ID,
     calendar_integration: true
   });
 });
@@ -657,7 +658,7 @@ app.get('/', (req, res) => {
     <h1>🚀 Nuviao GHL-Railway Bridge</h1>
     <p>Status: ✅ Online</p>
     <p>GHL API: ${process.env.GHL_API_KEY ? '✅ Configured' : '❌ Not Configured'}</p>
-    <p>Location ID: ${process.env.GHL_LOCATION_ID || 'Not Set'}</p>
+    <p>Location ID: ${LOCATION_ID || 'Not Set'}</p>
     <p>📅 Calendar Integration: ✅ Enabled</p>
     <hr>
     <h3>🔗 Available Endpoints:</h3>
