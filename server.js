@@ -81,10 +81,11 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
 }
 
 async function getLocationCalendars() {
-  const result = await makeGHLRequest(`/locations/${LOCATION_ID}/calendars`);
+  // Try the correct v1 calendar endpoint
+  const result = await makeGHLRequest(`/calendars/teams`);
   
   if (result.success) {
-    return result.data.calendars || [];
+    return result.data.calendars || result.data.teams || result.data || [];
   }
   
   console.error('Failed to get calendars:', result.error);
