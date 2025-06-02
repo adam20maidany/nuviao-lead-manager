@@ -147,14 +147,28 @@ async function getAvailableSlots(oauth2Client, targetDate) {
     });
     
     if (!hasConflict) {
+      // Convert to Las Vegas time for display
+      const vegasTime = new Date(slotStart.toLocaleString("en-US", {timeZone: "America/Los_Angeles"}));
+      
       availableSlots.push({
         startTime: slotStart.toISOString(),
         endTime: slotEnd.toISOString(),
-        displayTime: slotStart.toLocaleTimeString('en-US', {
+        displayTime: vegasTime.toLocaleTimeString('en-US', {
           hour: 'numeric',
           minute: '2-digit',
-          hour12: true,
-          timeZone: BUSINESS_HOURS.timezone
+          hour12: true
+        }),
+        displayDate: slotStart.toLocaleDateString('en-US', {
+          weekday: 'long',
+          month: 'long', 
+          day: 'numeric',
+          timeZone: 'America/Los_Angeles'
+        }),
+        vegasTime: slotStart.toLocaleString('en-US', {
+          timeZone: 'America/Los_Angeles',
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true
         })
       });
     }
