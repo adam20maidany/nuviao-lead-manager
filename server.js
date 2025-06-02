@@ -15,6 +15,14 @@ const {
   bookAppointmentWithGoogle 
 } = require('./google-calendar');
 
+// 🆕 Import Smart Callback Algorithm
+const { 
+  SmartCallbackPredictor,
+  initializeCallback,
+  getOptimalCallTimes,
+  recordCall
+} = require('./smart-callback-algorithm');
+
 // Debug environment variables
 console.log('🔍 Environment check:');
 console.log('SUPABASE_URL exists:', !!process.env.SUPABASE_URL);
@@ -102,8 +110,148 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 // ================================
-// 🆕 RETELL AI FUNCTION ENDPOINTS
+// 🆕 SMART CALLBACK ENDPOINTS
 // ================================
+
+// Get AI-predicted optimal call times for a lead
+app.get('/webhook/optimal-call-times/:leadId', async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const daysAhead = parseInt(req.query.days) || 3;
+    
+    console.log(`🧠 Getting optimal call times for lead ${leadId}`);
+    
+    const predictor = new SmartCallbackPredictor();
+    const predictions = await predictor.predictOptimalCallTimes(leadId, daysAhead);
+    
+    res.json({
+      success: true,
+      lead_id: leadId,
+      predictions: predictions,
+      total_days: predictions.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Optimal call times error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get optimal call times'
+    });
+  }
+});
+
+// Schedule smart callbacks for a lead
+app.post('/webhook/schedule-smart-callbacks/bestbuyremodel', async (req, res) => {
+  try {
+    const { leadId, initialOutcome, maxCallbacksPerDay } = req.body;
+    
+    if (!leadId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: leadId'
+      });
+    }
+    
+    console.log(`🧠 Scheduling smart callbacks for lead ${leadId}, outcome: ${initialOutcome}`);
+    
+    const result = await initializeCallback(leadId, initialOutcome || 'no_answer');
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('❌ Schedule smart callbacks error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to schedule smart callbacks'
+    });
+  }
+});
+
+// Get pending callbacks from the queue
+app.get('/webhook/callback-queue', async (req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const futureTime = new Date();
+    futureTime.setMinutes(futureTime.getMinutes() + 30); // Next 30 minutes
+    
+    const { data, error } = await global.supabase
+      .from('callback_queue')
+      .select(`
+        *,
+        leads (
+          id,
+          name,
+          phone,
+          email,
+          custom_fields
+        )
+      `)
+      .eq('status', 'scheduled')
+      .gte('scheduled_time', now)
+      .lte('scheduled_time', futureTime.toISOString())
+      .order('predicted_score', { ascending: false });
+    
+    if (error) throw error;
+    
+    res.json({
+      success: true,
+      pending_callbacks: data || [],
+      count: data?.length || 0
+    });
+    
+  } catch (error) {
+    console.error('❌ Get callback queue error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get callback queue'
+    });
+  }
+});
+
+// Update callback with actual outcome (for learning)
+app.post('/webhook/update-callback-outcome/bestbuyremodel', async (req, res) => {
+  try {
+    const { callbackId, actualOutcome, callDuration, retellCallId } = req.body;
+    
+    if (!callbackId || !actualOutcome) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: callbackId and actualOutcome'
+      });
+    }
+    
+    console.log(`🎯 Updating callback ${callbackId} with outcome: ${actualOutcome}`);
+    
+    const predictor = new SmartCallbackPredictor();
+    const accuracyResult = await predictor.updatePredictionAccuracy(callbackId, actualOutcome);
+    
+    // Also update the callback record
+    const { error } = await global.supabase
+      .from('callback_queue')
+      .update({
+        status: 'completed',
+        actual_outcome: actualOutcome,
+        retell_call_id: retellCallId,
+        completed_at: new Date().toISOString()
+      })
+      .eq('id', callbackId);
+    
+    if (error) throw error;
+    
+    res.json({
+      success: true,
+      message: 'Callback outcome updated successfully',
+      prediction_accuracy: accuracyResult?.accuracy
+    });
+    
+  } catch (error) {
+    console.error('❌ Update callback outcome error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update callback outcome'
+    });
+  }
+});
 
 // 1. Schedule Lead (Google Calendar Integration)
 app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
@@ -169,6 +317,15 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
       
       if (bookingResult.success) {
         console.log(`✅ Google Calendar appointment booked for ${leadInfo.clientName}`);
+        
+        // 🆕 Record successful appointment booking in call history
+        await recordCall(leadId || UUID, {
+          callTime: new Date().toISOString(),
+          outcome: 'appointment_booked',
+          duration: 0,
+          attemptNumber: 1,
+          notes: `Appointment booked: ${appointmentDate.toLocaleString()}`
+        });
         
         // Update lead status in database
         if (global.supabase) {
@@ -375,6 +532,30 @@ app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
       });
     }
 
+    // 🆕 Get lead ID from UUID
+    let leadId = null;
+    if (global.supabase) {
+      const { data } = await global.supabase
+        .from('leads')
+        .select('id')
+        .eq('custom_fields->uuid', uuid)
+        .single();
+      leadId = data?.id;
+    }
+
+    // 🆕 Record the callback request and schedule smart callbacks
+    if (leadId) {
+      await recordCall(leadId, {
+        callTime: new Date().toISOString(),
+        outcome: 'callback_requested',
+        duration: 0,
+        notes: `Callback requested for: ${proposed_callback_time}`
+      });
+
+      // Schedule smart callbacks using AI predictions
+      await initializeCallback(leadId, 'callback_requested');
+    }
+
     if (global.supabase) {
       const { error } = await global.supabase
         .from('leads')
@@ -391,7 +572,7 @@ app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Callback scheduled successfully',
+      message: 'Smart callbacks scheduled successfully',
       callback_time: proposed_callback_time
     });
 
@@ -976,7 +1157,7 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
     console.log('🤖 Retell webhook received:', req.body.event_type);
     
     if (req.body.event_type === 'call_ended') {
-      const { call_id, call_analysis } = req.body;
+      const { call_id, call_analysis, metadata } = req.body;
       
       let outcome = 'no_answer';
       if (call_analysis?.summary) {
@@ -993,6 +1174,36 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
       }
       
       console.log(`📞 Call ${call_id} ended with outcome: ${outcome}`);
+      
+      // 🆕 Record call outcome for AI learning
+      if (metadata?.uuid && global.supabase) {
+        try {
+          // Get lead ID from UUID
+          const { data: lead } = await global.supabase
+            .from('leads')
+            .select('id')
+            .eq('custom_fields->uuid', metadata.uuid)
+            .single();
+          
+          if (lead) {
+            await recordCall(lead.id, {
+              callTime: new Date().toISOString(),
+              outcome: outcome,
+              duration: req.body.call_duration || 0,
+              notes: call_analysis?.summary || ''
+            });
+
+            // If call failed, schedule smart callbacks
+            const callbackTriggers = ['no_answer', 'follow_up'];
+            if (callbackTriggers.includes(outcome)) {
+              await initializeCallback(lead.id, outcome);
+              console.log(`🧠 Smart callbacks scheduled for lead ${lead.id}`);
+            }
+          }
+        } catch (error) {
+          console.error('❌ Failed to process call outcome for AI:', error);
+        }
+      }
       
       if (outcome === 'booked') {
         console.log('🎉 Appointment was booked during call via Google Calendar!');
