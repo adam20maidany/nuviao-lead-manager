@@ -32,47 +32,388 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// 🆕 Import and use the webhook router with calendar integration
-const webhookRouter = require('./webhook');
-app.use('/webhook', webhookRouter);
+// ================================
+// 🆕 CALENDAR INTEGRATION FUNCTIONS
+// ================================
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    service: 'Nuviao GHL-Railway Bridge',
-    ghl_api_configured: !!process.env.GHL_API_KEY,
-    location_id: process.env.GHL_LOCATION_ID,
-    calendar_integration: true // 🆕 NEW: Shows calendar is enabled
-  });
-});
+const GHL_BASE_URL = 'https://rest.gohighlevel.com/v1';
+const BUSINESS_HOURS = {
+  start: 9, // 9 AM
+  end: 17,  // 5 PM
+  timezone: 'America/Los_Angeles' // Las Vegas timezone
+};
 
-// Simple homepage
-app.get('/', (req, res) => {
-  res.send(`
-    <h1>🚀 Nuviao GHL-Railway Bridge</h1>
-    <p>Status: ✅ Online</p>
-    <p>GHL API: ${process.env.GHL_API_KEY ? '✅ Configured' : '❌ Not Configured'}</p>
-    <p>Location ID: ${process.env.GHL_LOCATION_ID || 'Not Set'}</p>
-    <p>📅 Calendar Integration: ✅ Enabled</p>
-    <hr>
-    <h3>🔗 Available Endpoints:</h3>
-    <ul>
-      <li><code>POST /webhook/ghl-bridge/bestbuyremodel</code> - Main GHL bridge</li>
-      <li><code>POST /webhook/retell/bestbuyremodel</code> - Retell webhook</li>
-      <li><code>POST /webhook/book-appointment/bestbuyremodel</code> - Book appointments</li>
-      <li><code>GET /webhook/availability/bestbuyremodel</code> - Check availability</li>
-      <li><code>GET /webhook/test-calendar</code> - Test calendar integration</li>
-    </ul>
-  `);
-});
+const APPOINTMENT_CONFIG = {
+  duration: 60, // 1 hour in minutes
+  buffer: 60,   // 1 hour buffer between appointments
+  title: 'Estimate' // Will be "Estimate - John Smith"
+};
 
-// 🆕 BACKUP: Keep the original GHL bridge here for compatibility
-// (Remove this once you confirm the router version works)
-app.post('/backup-webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
+async function makeGHLRequest(endpoint, method = 'GET', body = null) {
+  const url = `${GHL_BASE_URL}${endpoint}`;
+  
+  const options = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+      'Content-Type': 'application/json'
+    }
+  };
+  
+  if (body && method !== 'GET') {
+    options.body = JSON.stringify(body);
+  }
+  
   try {
-    console.log('🔗 BACKUP GHL Bridge received data:', req.body);
+    const response = await fetch(url, options);
+    const data = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(`GHL API Error: ${response.status} - ${JSON.stringify(data)}`);
+    }
+    
+    return { success: true, data };
+  } catch (error) {
+    console.error('GHL API Request Failed:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+async function getLocationCalendars() {
+  const result = await makeGHLRequest(`/locations/${process.env.GHL_LOCATION_ID}/calendars`);
+  
+  if (result.success) {
+    return result.data.calendars || [];
+  }
+  
+  console.error('Failed to get calendars:', result.error);
+  return [];
+}
+
+async function getCalendarEvents(calendarId, startDate, endDate) {
+  const endpoint = `/calendars/${calendarId}/events?startDate=${startDate}&endDate=${endDate}`;
+  const result = await makeGHLRequest(endpoint);
+  
+  if (result.success) {
+    return result.data.events || [];
+  }
+  
+  console.error('Failed to get events:', result.error);
+  return [];
+}
+
+function isBusinessHour(hour, minute = 0) {
+  return hour >= BUSINESS_HOURS.start && hour < BUSINESS_HOURS.end;
+}
+
+function isWeekday(date) {
+  const day = date.getDay();
+  return day >= 1 && day <= 5; // Monday = 1, Friday = 5
+}
+
+async function getAvailableSlots(calendarId, targetDate) {
+  const startOfDay = new Date(targetDate);
+  startOfDay.setHours(0, 0, 0, 0);
+  
+  const endOfDay = new Date(targetDate);
+  endOfDay.setHours(23, 59, 59, 999);
+  
+  const existingEvents = await getCalendarEvents(
+    calendarId, 
+    startOfDay.toISOString(), 
+    endOfDay.toISOString()
+  );
+  
+  const availableSlots = [];
+  
+  if (!isWeekday(new Date(targetDate))) {
+    return availableSlots; // No weekend appointments
+  }
+  
+  for (let hour = BUSINESS_HOURS.start; hour < BUSINESS_HOURS.end; hour++) {
+    const slotStart = new Date(targetDate);
+    slotStart.setHours(hour, 0, 0, 0);
+    
+    const slotEnd = new Date(slotStart);
+    slotEnd.setMinutes(slotEnd.getMinutes() + APPOINTMENT_CONFIG.duration);
+    
+    const hasConflict = existingEvents.some(event => {
+      const eventStart = new Date(event.startTime);
+      const eventEnd = new Date(event.endTime);
+      
+      const bufferStart = new Date(eventStart);
+      bufferStart.setMinutes(bufferStart.getMinutes() - APPOINTMENT_CONFIG.buffer);
+      
+      const bufferEnd = new Date(eventEnd);
+      bufferEnd.setMinutes(bufferEnd.getMinutes() + APPOINTMENT_CONFIG.buffer);
+      
+      return (slotStart < bufferEnd && slotEnd > bufferStart);
+    });
+    
+    if (!hasConflict) {
+      availableSlots.push({
+        startTime: slotStart.toISOString(),
+        endTime: slotEnd.toISOString(),
+        displayTime: slotStart.toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true
+        })
+      });
+    }
+  }
+  
+  return availableSlots;
+}
+
+async function findNextAvailableSlots(calendarId, daysAhead = 14) {
+  const availableSlots = [];
+  const today = new Date();
+  
+  for (let i = 0; i < daysAhead; i++) {
+    const checkDate = new Date(today);
+    checkDate.setDate(today.getDate() + i);
+    
+    const daySlots = await getAvailableSlots(calendarId, checkDate);
+    
+    if (daySlots.length > 0) {
+      availableSlots.push({
+        date: checkDate.toDateString(),
+        slots: daySlots
+      });
+    }
+    
+    if (availableSlots.length >= 5) break;
+  }
+  
+  return availableSlots;
+}
+
+async function checkAvailabilityForAI(daysAhead = 7) {
+  try {
+    const calendars = await getLocationCalendars();
+    
+    if (calendars.length === 0) {
+      throw new Error('No calendars found for location');
+    }
+    
+    const primaryCalendar = calendars[0];
+    const availability = await findNextAvailableSlots(primaryCalendar.id, daysAhead);
+    
+    return {
+      success: true,
+      calendar: primaryCalendar,
+      availability: availability,
+      message: `Found ${availability.length} days with available slots`
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+async function bookEstimateAppointment(appointmentData) {
+  try {
+    const calendars = await getLocationCalendars();
+    
+    if (calendars.length === 0) {
+      throw new Error('No calendars found for location');
+    }
+    
+    const primaryCalendar = calendars[0];
+    
+    const {
+      clientName,
+      clientPhone,
+      clientEmail,
+      homeAddress,
+      estimateType,
+      callSummary,
+      startTime,
+      endTime
+    } = appointmentData;
+    
+    const title = `${APPOINTMENT_CONFIG.title} - ${clientName}`;
+    
+    const description = `
+🏠 ESTIMATE APPOINTMENT
+
+📋 Client Information:
+• Name: ${clientName}
+• Phone: ${clientPhone}
+• Email: ${clientEmail}
+• Address: ${homeAddress}
+
+🔨 Estimate Type: ${estimateType}
+
+📞 Call Summary:
+${callSummary}
+
+⏰ Scheduled by AI Lead Manager
+    `.trim();
+    
+    const eventData = {
+      title,
+      description,
+      startTime,
+      endTime,
+      locationId: process.env.GHL_LOCATION_ID,
+      contactId: appointmentData.contactId || null,
+      appointmentStatus: 'confirmed'
+    };
+    
+    const result = await makeGHLRequest(`/calendars/${primaryCalendar.id}/events`, 'POST', eventData);
+    
+    if (result.success) {
+      console.log('✅ Appointment booked successfully:', result.data);
+      return {
+        success: true,
+        appointmentId: result.data.id,
+        appointment: result.data
+      };
+    } else {
+      console.error('❌ Failed to book appointment:', result.error);
+      return {
+        success: false,
+        error: result.error
+      };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// ================================
+// 🆕 NEW CALENDAR ENDPOINTS
+// ================================
+
+// Test calendar integration
+app.get('/webhook/test-calendar', async (req, res) => {
+  try {
+    const availability = await checkAvailabilityForAI(3);
+    res.json({
+      message: 'Calendar integration test',
+      availability: availability,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Calendar test failed',
+      details: error.message
+    });
+  }
+});
+
+// Check availability endpoint
+app.get('/webhook/availability/bestbuyremodel', async (req, res) => {
+  try {
+    const daysAhead = parseInt(req.query.days) || 7;
+    const availability = await checkAvailabilityForAI(daysAhead);
+    
+    res.json(availability);
+  } catch (error) {
+    console.error('❌ Availability check error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to check availability' 
+    });
+  }
+});
+
+// Book appointment endpoint
+app.post('/webhook/book-appointment/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📅 Booking appointment request:', req.body);
+    
+    const {
+      clientName,
+      clientPhone,
+      clientEmail,
+      homeAddress,
+      estimateType,
+      callSummary,
+      selectedTimeSlot,
+      ghlContactId
+    } = req.body;
+
+    if (!clientName || !clientPhone || !selectedTimeSlot) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: clientName, clientPhone, selectedTimeSlot'
+      });
+    }
+
+    const startTime = new Date(selectedTimeSlot);
+    const endTime = new Date(startTime);
+    endTime.setHours(endTime.getHours() + 1);
+
+    const appointmentData = {
+      clientName,
+      clientPhone,
+      clientEmail: clientEmail || '',
+      homeAddress: homeAddress || 'Address to be confirmed',
+      estimateType: estimateType || 'General Estimate',
+      callSummary: callSummary || 'Scheduled via AI call',
+      startTime: startTime.toISOString(),
+      endTime: endTime.toISOString(),
+      contactId: ghlContactId
+    };
+
+    const bookingResult = await bookEstimateAppointment(appointmentData);
+
+    if (bookingResult.success) {
+      console.log(`✅ Appointment booked for ${clientName} at ${startTime.toLocaleString()}`);
+      
+      if (global.supabase && req.body.lead_id) {
+        try {
+          await global.supabase
+            .from('leads')
+            .update({ 
+              status: 'appointment_booked',
+              appointment_time: startTime.toISOString()
+            })
+            .eq('id', req.body.lead_id);
+        } catch (dbError) {
+          console.error('Failed to update lead status:', dbError);
+        }
+      }
+
+      res.json({
+        success: true,
+        message: 'Appointment booked successfully',
+        appointmentId: bookingResult.appointmentId,
+        appointmentTime: startTime.toLocaleString()
+      });
+    } else {
+      console.error('❌ Failed to book appointment:', bookingResult.error);
+      res.status(500).json({
+        success: false,
+        error: bookingResult.error
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Appointment booking error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to book appointment' 
+    });
+  }
+});
+
+// ================================
+// EXISTING ENDPOINTS (UPDATED)
+// ================================
+
+// GHL BRIDGE WEBHOOK - WITH CALENDAR INTEGRATION
+app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('🔗 GHL Bridge received data:', req.body);
     
     // Extract lead data
     const leadData = {
@@ -130,17 +471,30 @@ app.post('/backup-webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
       ghlContact = await createGHLContact(leadData);
     }
 
-    // Step 3: Initiate AI call via Retell
+    // 🆕 Step 3: Check calendar availability
+    console.log('📅 Checking calendar availability...');
+    const availability = await checkAvailabilityForAI(7);
+    
+    if (availability.success && availability.availability.length > 0) {
+      console.log(`✅ Found ${availability.availability.length} days with available slots`);
+      leadData.availability = availability.availability;
+    } else {
+      console.log('⚠️ No availability found, Carl will handle scheduling manually');
+      leadData.availability = [];
+    }
+
+    // Step 4: Initiate AI call via Retell with availability
     const callResult = await initiateAICall(leadData, savedLead?.id, ghlContact?.contact?.id);
     
-    // Step 4: Send response
+    // Step 5: Send response
     res.json({ 
       success: true, 
-      message: 'Lead processed, GHL contact created, and AI call initiated (BACKUP)',
+      message: 'Lead processed, GHL contact created, availability checked, and AI call initiated',
       railway_lead_id: savedLead?.id,
       ghl_contact_id: ghlContact?.contact?.id,
       call_id: callResult.call_id,
-      ghl_contact_created: !!ghlContact
+      ghl_contact_created: !!ghlContact,
+      availability_slots: availability.success ? availability.availability.length : 0
     });
 
   } catch (error) {
@@ -185,7 +539,6 @@ async function createGHLContact(leadData) {
   } catch (error) {
     console.error('❌ GHL contact creation failed:', error.response?.data || error.message);
     
-    // Log more details for debugging
     if (error.response) {
       console.error('Response status:', error.response.status);
       console.error('Response data:', error.response.data);
@@ -214,7 +567,9 @@ async function initiateAICall(leadData, railwayLeadId, ghlContactId) {
         first_name: leadData.name.split(' ')[0],
         full_name: leadData.name,
         phone: leadData.phone,
-        email: leadData.email || ''
+        email: leadData.email || '',
+        // 🆕 Include availability for Carl
+        calendar_availability: JSON.stringify(leadData.availability || [])
       }
     }, {
       headers: {
@@ -261,6 +616,10 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
       }
       
       console.log(`📞 Call ${call_id} ended with outcome: ${outcome}`);
+      
+      if (outcome === 'booked') {
+        console.log('🎉 Appointment was booked during call!');
+      }
     }
     
     res.json({ success: true });
@@ -270,8 +629,50 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
   }
 });
 
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    service: 'Nuviao GHL-Railway Bridge',
+    ghl_api_configured: !!process.env.GHL_API_KEY,
+    location_id: process.env.GHL_LOCATION_ID,
+    calendar_integration: true
+  });
+});
+
+// Test endpoint
+app.get('/webhook/test', (req, res) => {
+  res.json({
+    message: 'GHL Bridge is working!',
+    endpoint: '/webhook/ghl-bridge/bestbuyremodel',
+    timestamp: new Date().toISOString(),
+    calendar_enabled: true
+  });
+});
+
+// Simple homepage
+app.get('/', (req, res) => {
+  res.send(`
+    <h1>🚀 Nuviao GHL-Railway Bridge</h1>
+    <p>Status: ✅ Online</p>
+    <p>GHL API: ${process.env.GHL_API_KEY ? '✅ Configured' : '❌ Not Configured'}</p>
+    <p>Location ID: ${process.env.GHL_LOCATION_ID || 'Not Set'}</p>
+    <p>📅 Calendar Integration: ✅ Enabled</p>
+    <hr>
+    <h3>🔗 Available Endpoints:</h3>
+    <ul>
+      <li><code>POST /webhook/ghl-bridge/bestbuyremodel</code> - Main GHL bridge with calendar</li>
+      <li><code>POST /webhook/retell/bestbuyremodel</code> - Retell webhook</li>
+      <li><code>POST /webhook/book-appointment/bestbuyremodel</code> - Book appointments</li>
+      <li><code>GET /webhook/availability/bestbuyremodel</code> - Check availability</li>
+      <li><code>GET /webhook/test-calendar</code> - Test calendar integration</li>
+    </ul>
+  `);
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Nuviao Bridge running on port ${PORT}`);
   console.log(`🎯 GHL Bridge ready with API contact creation!`);
-  console.log(`📅 Calendar integration enabled via router!`);
+  console.log(`📅 Calendar integration enabled!`);
 });
