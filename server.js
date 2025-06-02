@@ -90,49 +90,72 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
 async function getLocationCalendars() {
   console.log('🔍 Getting calendars via locations endpoint...');
   
-  // First, get all locations (this works!)
-  const locationsResult = await makeGHLRequest('/locations');
-  
-  if (!locationsResult.success) {
-    console.error('❌ Failed to get locations');
-    return [];
-  }
-  
-  console.log('✅ Got locations data:', locationsResult.data);
-  
-  // Find our specific location
-  const locations = locationsResult.data.locations || [locationsResult.data];
-  const targetLocation = locations.find(loc => loc.id === LOCATION_ID) || locations[0];
-  
-  if (!targetLocation) {
-    console.error('❌ Target location not found');
-    return [];
-  }
-  
-  console.log('🎯 Using location:', targetLocation.name, targetLocation.id);
-  
-  // Try location-specific calendar endpoints
-  const calendarEndpoints = [
-    `/locations/${targetLocation.id}/calendars`,
-    `/calendars?locationId=${targetLocation.id}`,
-    `/calendars/${targetLocation.id}`,
-    `/locations/${targetLocation.id}/calendar`,
-  ];
-  
-  for (const endpoint of calendarEndpoints) {
-    console.log(`🧪 Testing calendar endpoint: ${endpoint}`);
-    const result = await makeGHLRequest(endpoint);
+  try {
+    // First, get all locations (this works!)
+    const locationsResult = await makeGHLRequest('/locations');
     
-    if (result.success) {
-      console.log(`✅ Success with: ${endpoint}`);
-      return result.data.calendars || result.data || [];
-    } else {
-      console.log(`❌ Failed: ${result.error}`);
+    if (!locationsResult.success) {
+      console.error('❌ Failed to get locations:', locationsResult.error);
+      return [];
     }
+    
+    console.log('✅ Got locations data successfully');
+    
+    // Find our specific location
+    const locations = locationsResult.data.locations || [locationsResult.data];
+    const targetLocation = locations.find(loc => loc.id === LOCATION_ID) || locations[0];
+    
+    if (!targetLocation) {
+      console.error('❌ Target location not found');
+      return [];
+    }
+    
+    console.log('🎯 Using location:', targetLocation.name, targetLocation.id);
+    
+    // Try location-specific calendar endpoints
+    const calendarEndpoints = [
+      `/locations/${targetLocation.id}/calendars`,
+      `/calendars?locationId=${targetLocation.id}`,
+      `/calendars/${targetLocation.id}`,
+      `/locations/${targetLocation.id}/calendar`,
+    ];
+    
+    for (const endpoint of calendarEndpoints) {
+      try {
+        console.log(`🧪 Testing calendar endpoint: ${endpoint}`);
+        const result = await makeGHLRequest(endpoint);
+        
+        if (result.success) {
+          console.log(`✅ SUCCESS with: ${endpoint}`);
+          console.log(`📅 Calendar data:`, JSON.stringify(result.data, null, 2));
+          return result.data.calendars || result.data || [];
+        } else {
+          console.log(`❌ FAILED ${endpoint}:`, result.error);
+        }
+      } catch (endpointError) {
+        console.log(`💥 ERROR testing ${endpoint}:`, endpointError.message);
+      }
+    }
+    
+    console.error('❌ All calendar endpoints failed - trying simple calendars endpoint');
+    
+    // Last attempt - try simple calendars
+    try {
+      const simpleResult = await makeGHLRequest('/calendars');
+      if (simpleResult.success) {
+        console.log('✅ Simple calendars worked:', simpleResult.data);
+        return simpleResult.data.calendars || simpleResult.data || [];
+      }
+    } catch (finalError) {
+      console.log('💥 Final calendars attempt failed:', finalError.message);
+    }
+    
+    return [];
+    
+  } catch (error) {
+    console.error('💥 getLocationCalendars error:', error.message);
+    return [];
   }
-  
-  console.error('❌ All calendar endpoints failed');
-  return [];
 }
 
 async function getCalendarEvents(calendarId, startDate, endDate) {
