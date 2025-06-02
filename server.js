@@ -102,152 +102,673 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 // ================================
-// 🆕 GOOGLE CALENDAR API ENDPOINTS
+// 🆕 RETELL AI FUNCTION ENDPOINTS
 // ================================
 
-// Test Google Calendar integration
-app.get('/webhook/test-google-calendar', async (req, res) => {
+// 1. Schedule Lead (Google Calendar Integration)
+app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
   try {
-    if (!googleTokens) {
-      return res.json({
-        success: false,
-        error: 'Google Calendar not authorized yet',
-        authUrl: getAuthUrl(),
-        message: 'Visit the authUrl to authorize Google Calendar access first'
-      });
-    }
+    console.log('📅 Schedule Lead called:', req.body);
     
-    console.log('🧪 Testing Google Calendar integration...');
-    const availability = await checkAvailabilityWithGoogle(googleTokens, 3);
+    const { UUID, chosen_appointment_slot, additional_information } = req.body;
     
-    res.json({
-      message: 'Google Calendar integration test',
-      availability: availability,
-      timestamp: new Date().toISOString(),
-      authorized: true
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Google Calendar test failed',
-      details: error.message,
-      authorized: !!googleTokens
-    });
-  }
-});
-
-// Check availability endpoint
-app.get('/webhook/availability/bestbuyremodel', async (req, res) => {
-  try {
-    if (!googleTokens) {
-      return res.status(401).json({
-        success: false,
-        error: 'Google Calendar not authorized',
-        authUrl: getAuthUrl()
-      });
-    }
-    
-    const daysAhead = parseInt(req.query.days) || 7;
-    const availability = await checkAvailabilityWithGoogle(googleTokens, daysAhead);
-    
-    res.json(availability);
-  } catch (error) {
-    console.error('❌ Availability check error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to check availability' 
-    });
-  }
-});
-
-// Book appointment endpoint
-app.post('/webhook/book-appointment/bestbuyremodel', async (req, res) => {
-  try {
-    if (!googleTokens) {
-      return res.status(401).json({
-        success: false,
-        error: 'Google Calendar not authorized',
-        authUrl: getAuthUrl()
-      });
-    }
-    
-    console.log('📅 Booking Google Calendar appointment:', req.body);
-    
-    const {
-      clientName,
-      clientPhone,
-      clientEmail,
-      homeAddress,
-      estimateType,
-      callSummary,
-      selectedTimeSlot,
-      ghlContactId
-    } = req.body;
-
-    if (!clientName || !clientPhone || !selectedTimeSlot) {
+    if (!UUID || !chosen_appointment_slot) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: clientName, clientPhone, selectedTimeSlot'
+        error: 'Missing required fields: UUID and chosen_appointment_slot'
       });
     }
 
-    const startTime = new Date(selectedTimeSlot);
-    const endTime = new Date(startTime);
-    endTime.setHours(endTime.getHours() + 1);
+    // Convert YYYY-mm-dd hh:mm:ss to ISO timestamp
+    const appointmentDate = new Date(chosen_appointment_slot.replace(' ', 'T') + ':00.000Z');
+    const endDate = new Date(appointmentDate);
+    endDate.setHours(endDate.getHours() + 1);
 
-    const appointmentData = {
-      clientName,
-      clientPhone,
-      clientEmail: clientEmail || '',
-      homeAddress: homeAddress || 'Address to be confirmed',
-      estimateType: estimateType || 'General Estimate',
-      callSummary: callSummary || 'Scheduled via AI call',
-      startTime: startTime.toISOString(),
-      endTime: endTime.toISOString(),
-      contactId: ghlContactId
+    // Get lead information from database or construct from UUID
+    let leadInfo = {
+      clientName: 'Lead ' + UUID.substring(0, 8),
+      clientPhone: 'Unknown',
+      clientEmail: 'unknown@email.com',
+      homeAddress: 'Address to be confirmed',
+      estimateType: 'General Estimate'
     };
 
-    const bookingResult = await bookAppointmentWithGoogle(googleTokens, appointmentData);
+    // Try to get lead info from Supabase
+    if (global.supabase) {
+      try {
+        const { data, error } = await global.supabase
+          .from('leads')
+          .select('*')
+          .eq('custom_fields->uuid', UUID)
+          .single();
+        
+        if (data) {
+          leadInfo = {
+            clientName: data.name || leadInfo.clientName,
+            clientPhone: data.phone || leadInfo.clientPhone,
+            clientEmail: data.email || leadInfo.clientEmail,
+            homeAddress: data.custom_fields?.full_address || leadInfo.homeAddress,
+            estimateType: data.custom_fields?.project_type || leadInfo.estimateType
+          };
+        }
+      } catch (dbError) {
+        console.log('Note: Could not fetch lead details from database');
+      }
+    }
 
-    if (bookingResult.success) {
-      console.log(`✅ Google Calendar appointment booked for ${clientName} at ${startTime.toLocaleString()}`);
+    const appointmentData = {
+      ...leadInfo,
+      callSummary: additional_information || 'Scheduled via AI call',
+      startTime: appointmentDate.toISOString(),
+      endTime: endDate.toISOString()
+    };
+
+    // Book in Google Calendar if available
+    if (googleTokens) {
+      const bookingResult = await bookAppointmentWithGoogle(googleTokens, appointmentData);
       
-      // Update lead status in database
-      if (global.supabase && req.body.lead_id) {
-        try {
-          await global.supabase
-            .from('leads')
-            .update({ 
-              status: 'appointment_booked',
-              appointment_time: startTime.toISOString(),
-              calendar_provider: 'Google Calendar'
-            })
-            .eq('id', req.body.lead_id);
-        } catch (dbError) {
-          console.error('Failed to update lead status:', dbError);
+      if (bookingResult.success) {
+        console.log(`✅ Google Calendar appointment booked for ${leadInfo.clientName}`);
+        
+        // Update lead status in database
+        if (global.supabase) {
+          try {
+            await global.supabase
+              .from('leads')
+              .update({ 
+                status: 'appointment_booked',
+                appointment_time: appointmentDate.toISOString()
+              })
+              .eq('custom_fields->uuid', UUID);
+          } catch (dbError) {
+            console.error('Failed to update lead status:', dbError);
+          }
+        }
+
+        res.json({
+          success: true,
+          message: 'Appointment scheduled successfully',
+          appointment_id: bookingResult.appointmentId,
+          calendar_link: bookingResult.calendarLink
+        });
+      } else {
+        res.status(500).json({
+          success: false,
+          error: 'Failed to book appointment: ' + bookingResult.error
+        });
+      }
+    } else {
+      // Fallback: Mark as scheduled but manual calendar entry needed
+      res.json({
+        success: true,
+        message: 'Appointment scheduled - manual calendar entry required',
+        note: 'Google Calendar not authorized'
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Schedule lead error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to schedule appointment'
+    });
+  }
+});
+
+// 2. Check Schedule Availability (Google Calendar Integration)
+app.post('/webhook/check-availability/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📅 Check availability called:', req.body);
+    
+    const { appointment_date } = req.body;
+    
+    if (!appointment_date) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: appointment_date'
+      });
+    }
+
+    if (googleTokens) {
+      // Check Google Calendar availability for specific date
+      const availability = await checkAvailabilityWithGoogle(googleTokens, 1);
+      
+      if (availability.success) {
+        // Filter for the requested date
+        const requestedDate = new Date(appointment_date);
+        const availableDay = availability.availability.find(day => {
+          const dayDate = new Date(day.date);
+          return dayDate.toDateString() === requestedDate.toDateString();
+        });
+
+        if (availableDay && availableDay.slots.length > 0) {
+          res.json({
+            success: true,
+            date: appointment_date,
+            available_slots: availableDay.slots.map(slot => slot.displayTime),
+            slots_count: availableDay.slots.length
+          });
+        } else {
+          res.json({
+            success: true,
+            date: appointment_date,
+            available_slots: [],
+            slots_count: 0,
+            message: 'No availability on this date'
+          });
+        }
+      } else {
+        res.status(500).json({
+          success: false,
+          error: 'Failed to check calendar availability'
+        });
+      }
+    } else {
+      // Fallback: Return generic availability
+      res.json({
+        success: true,
+        date: appointment_date,
+        available_slots: ['9:00 AM', '10:00 AM', '11:00 AM', '2:00 PM', '3:00 PM'],
+        slots_count: 5,
+        note: 'Generic availability - Google Calendar not authorized'
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Check availability error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to check availability'
+    });
+  }
+});
+
+// 3. Update Lead Phone Number
+app.post('/webhook/update-phone/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📞 Update phone called:', req.body);
+    
+    const { uuid, phone } = req.body;
+    
+    if (!uuid || !phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: uuid and phone'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ phone: phone })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+        res.status(500).json({ success: false, error: 'Database update failed' });
+      } else {
+        res.json({ success: true, message: 'Phone number updated successfully' });
+      }
+    } else {
+      res.json({ success: true, message: 'Phone number update noted' });
+    }
+
+  } catch (error) {
+    console.error('❌ Update phone error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update phone number' });
+  }
+});
+
+// 4. Validate Lead Address
+app.post('/webhook/validate-address/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📍 Validate address called:', req.body);
+    
+    const { address } = req.body;
+    
+    if (!address) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: address'
+      });
+    }
+
+    // Simple validation - check if it contains Las Vegas area
+    const isLasVegas = address.toLowerCase().includes('las vegas') || 
+                      address.toLowerCase().includes('henderson') ||
+                      address.toLowerCase().includes('summerlin') ||
+                      /89\d{3}/.test(address); // Las Vegas ZIP codes
+
+    if (isLasVegas) {
+      res.json({
+        success: true,
+        valid: true,
+        message: 'Address is within service area',
+        corrected_address: address
+      });
+    } else {
+      res.json({
+        success: true,
+        valid: false,
+        message: 'Address is outside service area',
+        service_area: 'Las Vegas, Henderson, Summerlin area'
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Validate address error:', error);
+    res.status(500).json({ success: false, error: 'Failed to validate address' });
+  }
+});
+
+// 5. Call Lead Back Later
+app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('⏰ Call back later called:', req.body);
+    
+    const { uuid, proposed_callback_time } = req.body;
+    
+    if (!uuid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: uuid'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ 
+          status: 'callback_scheduled',
+          callback_time: proposed_callback_time 
+        })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Callback scheduled successfully',
+      callback_time: proposed_callback_time
+    });
+
+  } catch (error) {
+    console.error('❌ Call back later error:', error);
+    res.status(500).json({ success: false, error: 'Failed to schedule callback' });
+  }
+});
+
+// 6. Mark Wrong Number
+app.post('/webhook/mark-wrong-number/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('❌ Mark wrong number called:', req.body);
+    
+    const { uuid } = req.body;
+    
+    if (!uuid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: uuid'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ status: 'wrong_number' })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Lead marked as wrong number'
+    });
+
+  } catch (error) {
+    console.error('❌ Mark wrong number error:', error);
+    res.status(500).json({ success: false, error: 'Failed to mark wrong number' });
+  }
+});
+
+// 7. Update Lead Address
+app.post('/webhook/update-address/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📍 Update address called:', req.body);
+    
+    const { uuid, address, city, state, zip } = req.body;
+    
+    if (!uuid || !address || !city || !state || !zip) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: uuid, address, city, state, zip'
+      });
+    }
+
+    const fullAddress = `${address}, ${city}, ${state} ${zip}`;
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ 
+          custom_fields: {
+            full_address: fullAddress,
+            street_address: address,
+            city: city,
+            state: state,
+            zip_code: zip
+          }
+        })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+        res.status(500).json({ success: false, error: 'Database update failed' });
+      } else {
+        res.json({ 
+          success: true, 
+          message: 'Address updated successfully',
+          full_address: fullAddress
+        });
+      }
+    } else {
+      res.json({ success: true, message: 'Address update noted' });
+    }
+
+  } catch (error) {
+    console.error('❌ Update address error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update address' });
+  }
+});
+
+// 8. Lead Is Mobile Home
+app.post('/webhook/mobile-home/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('🏠 Mobile home called:', req.body);
+    
+    const { uuid } = req.body;
+    
+    if (!uuid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: uuid'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ status: 'mobile_home_declined' })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Lead marked as mobile home - project declined'
+    });
+
+  } catch (error) {
+    console.error('❌ Mobile home error:', error);
+    res.status(500).json({ success: false, error: 'Failed to mark mobile home' });
+  }
+});
+
+// 9. Lead Outside Area
+app.post('/webhook/outside-area/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('🌍 Outside area called:', req.body);
+    
+    const { uuid } = req.body;
+    
+    if (!uuid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: uuid'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ status: 'outside_service_area' })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Lead marked as outside service area'
+    });
+
+  } catch (error) {
+    console.error('❌ Outside area error:', error);
+    res.status(500).json({ success: false, error: 'Failed to mark outside area' });
+  }
+});
+
+// 10. Lead Not Interested
+app.post('/webhook/not-interested/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('❌ Not interested called:', req.body);
+    
+    const { uuid } = req.body;
+    
+    if (!uuid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: uuid'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ status: 'not_interested' })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Lead marked as not interested'
+    });
+
+  } catch (error) {
+    console.error('❌ Not interested error:', error);
+    res.status(500).json({ success: false, error: 'Failed to mark not interested' });
+  }
+});
+
+// 11. Transfer Call
+app.post('/webhook/transfer-call/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📞 Transfer call requested:', req.body);
+    
+    res.json({
+      success: true,
+      message: 'Call transfer initiated',
+      transfer_number: '+17252092232' // Best Buy Remodel main number
+    });
+
+  } catch (error) {
+    console.error('❌ Transfer call error:', error);
+    res.status(500).json({ success: false, error: 'Failed to transfer call' });
+  }
+});
+
+// 12. Update Lead First Name
+app.post('/webhook/update-first-name/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('👤 Update first name called:', req.body);
+    
+    const { uuid, first_name } = req.body;
+    
+    if (!uuid || !first_name) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: uuid and first_name'
+      });
+    }
+
+    if (global.supabase) {
+      // Get current name to update properly
+      const { data: currentLead } = await global.supabase
+        .from('leads')
+        .select('name')
+        .eq('custom_fields->uuid', uuid)
+        .single();
+      
+      let newFullName = first_name;
+      if (currentLead && currentLead.name) {
+        const nameParts = currentLead.name.split(' ');
+        if (nameParts.length > 1) {
+          newFullName = first_name + ' ' + nameParts.slice(1).join(' ');
         }
       }
 
-      res.json({
-        success: true,
-        message: 'Appointment booked successfully in Google Calendar',
-        appointmentId: bookingResult.appointmentId,
-        appointmentTime: startTime.toLocaleString(),
-        calendarLink: bookingResult.calendarLink
-      });
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ name: newFullName })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+        res.status(500).json({ success: false, error: 'Database update failed' });
+      } else {
+        res.json({ 
+          success: true, 
+          message: 'First name updated successfully',
+          new_name: newFullName
+        });
+      }
     } else {
-      console.error('❌ Failed to book Google Calendar appointment:', bookingResult.error);
-      res.status(500).json({
-        success: false,
-        error: bookingResult.error
-      });
+      res.json({ success: true, message: 'First name update noted' });
     }
 
   } catch (error) {
-    console.error('❌ Appointment booking error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to book appointment' 
+    console.error('❌ Update first name error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update first name' });
+  }
+});
+
+// 13. Update Lead Last Name
+app.post('/webhook/update-last-name/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('👤 Update last name called:', req.body);
+    
+    const { uuid, last_name } = req.body;
+    
+    if (!uuid || !last_name) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: uuid and last_name'
+      });
+    }
+
+    if (global.supabase) {
+      // Get current name to update properly
+      const { data: currentLead } = await global.supabase
+        .from('leads')
+        .select('name')
+        .eq('custom_fields->uuid', uuid)
+        .single();
+      
+      let newFullName = last_name;
+      if (currentLead && currentLead.name) {
+        const nameParts = currentLead.name.split(' ');
+        newFullName = nameParts[0] + ' ' + last_name;
+      }
+
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ name: newFullName })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+        res.status(500).json({ success: false, error: 'Database update failed' });
+      } else {
+        res.json({ 
+          success: true, 
+          message: 'Last name updated successfully',
+          new_name: newFullName
+        });
+      }
+    } else {
+      res.json({ success: true, message: 'Last name update noted' });
+    }
+
+  } catch (error) {
+    console.error('❌ Update last name error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update last name' });
+  }
+});
+
+// 14. Update Lead Email
+app.post('/webhook/update-email/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📧 Update email called:', req.body);
+    
+    const { uuid, email } = req.body;
+    
+    if (!uuid || !email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: uuid and email'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ email: email })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+        res.status(500).json({ success: false, error: 'Database update failed' });
+      } else {
+        res.json({ success: true, message: 'Email updated successfully' });
+      }
+    } else {
+      res.json({ success: true, message: 'Email update noted' });
+    }
+
+  } catch (error) {
+    console.error('❌ Update email error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update email' });
+  }
+});
+
+// 15. End Call
+app.post('/webhook/end-call/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📞 End call called:', req.body);
+    
+    res.json({
+      success: true,
+      message: 'Call ended successfully'
     });
+
+  } catch (error) {
+    console.error('❌ End call error:', error);
+    res.status(500).json({ success: false, error: 'Failed to end call' });
   }
 });
 
@@ -293,7 +814,8 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
             source: leadData.source,
             status: 'new',
             custom_fields: {
-              original_ghl_contact_id: leadData.ghl_contact_id
+              original_ghl_contact_id: leadData.ghl_contact_id,
+              uuid: require('crypto').randomUUID() // Generate UUID for Retell functions
             }
           })
           .select()
@@ -335,7 +857,7 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
     }
 
     // Step 4: Initiate AI call via Retell with availability
-    const callResult = await initiateAICall(leadData, savedLead?.id, ghlContact?.contact?.id);
+    const callResult = await initiateAICall(leadData, savedLead?.id, ghlContact?.contact?.id, savedLead?.custom_fields?.uuid);
     
     // Step 5: Send response
     res.json({ 
@@ -346,7 +868,8 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
       call_id: callResult.call_id,
       ghl_contact_created: !!ghlContact,
       calendar_authorized: !!googleTokens,
-      availability_slots: availability.success ? availability.availability.length : 0
+      availability_slots: availability.success ? availability.availability.length : 0,
+      uuid: savedLead?.custom_fields?.uuid
     });
 
   } catch (error) {
@@ -400,8 +923,8 @@ async function createGHLContact(leadData) {
   }
 }
 
-// Function to initiate AI call via Retell (updated with Google Calendar data)
-async function initiateAICall(leadData, railwayLeadId, ghlContactId) {
+// Function to initiate AI call via Retell (updated with Google Calendar data and UUID)
+async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
   try {
     if (!process.env.RETELL_API_KEY || !process.env.RETELL_AGENT_ID) {
       return { success: false, error: 'Retell not configured' };
@@ -420,6 +943,7 @@ async function initiateAICall(leadData, railwayLeadId, ghlContactId) {
         full_name: leadData.name,
         phone: leadData.phone,
         email: leadData.email || '',
+        uuid: uuid, // 🆕 Add UUID for function calls
         // 🆕 Include Google Calendar availability for Carl
         calendar_availability: JSON.stringify(leadData.availability || []),
         calendar_provider: 'Google Calendar'
@@ -482,6 +1006,120 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
   }
 });
 
+// ================================
+// LEGACY GOOGLE CALENDAR ENDPOINTS
+// ================================
+
+// Test Google Calendar integration
+app.get('/webhook/test-google-calendar', async (req, res) => {
+  try {
+    if (!googleTokens) {
+      return res.json({
+        success: false,
+        error: 'Google Calendar not authorized yet',
+        authUrl: getAuthUrl(),
+        message: 'Visit the authUrl to authorize Google Calendar access first'
+      });
+    }
+    
+    console.log('🧪 Testing Google Calendar integration...');
+    const availability = await checkAvailabilityWithGoogle(googleTokens, 3);
+    
+    res.json({
+      message: 'Google Calendar integration test',
+      availability: availability,
+      timestamp: new Date().toISOString(),
+      authorized: true
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Google Calendar test failed',
+      details: error.message,
+      authorized: !!googleTokens
+    });
+  }
+});
+
+// Manual appointment booking (for testing)
+app.post('/webhook/book-appointment/bestbuyremodel', async (req, res) => {
+  try {
+    if (!googleTokens) {
+      return res.status(401).json({
+        success: false,
+        error: 'Google Calendar not authorized',
+        authUrl: getAuthUrl()
+      });
+    }
+    
+    console.log('📅 Manual booking request:', req.body);
+    
+    const {
+      clientName,
+      clientPhone,
+      clientEmail,
+      homeAddress,
+      estimateType,
+      callSummary,
+      selectedTimeSlot,
+      ghlContactId
+    } = req.body;
+
+    if (!clientName || !clientPhone || !selectedTimeSlot) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: clientName, clientPhone, selectedTimeSlot'
+      });
+    }
+
+    const startTime = new Date(selectedTimeSlot);
+    const endTime = new Date(startTime);
+    endTime.setHours(endTime.getHours() + 1);
+
+    const appointmentData = {
+      clientName,
+      clientPhone,
+      clientEmail: clientEmail || '',
+      homeAddress: homeAddress || 'Address to be confirmed',
+      estimateType: estimateType || 'General Estimate',
+      callSummary: callSummary || 'Scheduled via AI call',
+      startTime: startTime.toISOString(),
+      endTime: endTime.toISOString(),
+      contactId: ghlContactId
+    };
+
+    const bookingResult = await bookAppointmentWithGoogle(googleTokens, appointmentData);
+
+    if (bookingResult.success) {
+      console.log(`✅ Manual appointment booked for ${clientName}`);
+
+      res.json({
+        success: true,
+        message: 'Appointment booked successfully in Google Calendar',
+        appointmentId: bookingResult.appointmentId,
+        appointmentTime: startTime.toLocaleString(),
+        calendarLink: bookingResult.calendarLink
+      });
+    } else {
+      console.error('❌ Failed to book manual appointment:', bookingResult.error);
+      res.status(500).json({
+        success: false,
+        error: bookingResult.error
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Manual appointment booking error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to book appointment' 
+    });
+  }
+});
+
+// ================================
+// HEALTH AND STATUS ENDPOINTS
+// ================================
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ 
@@ -492,7 +1130,8 @@ app.get('/health', (req, res) => {
     location_id: process.env.GHL_LOCATION_ID,
     google_calendar_configured: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
     google_calendar_authorized: !!googleTokens,
-    calendar_integration: 'Google Calendar'
+    calendar_integration: 'Google Calendar',
+    retell_functions: 'Active - 15 endpoints'
   });
 });
 
@@ -504,7 +1143,8 @@ app.get('/webhook/test', (req, res) => {
     timestamp: new Date().toISOString(),
     calendar_enabled: true,
     calendar_provider: 'Google Calendar',
-    google_authorized: !!googleTokens
+    google_authorized: !!googleTokens,
+    retell_functions: 15
   });
 });
 
@@ -517,15 +1157,33 @@ app.get('/', (req, res) => {
     <p>Location ID: ${process.env.GHL_LOCATION_ID || 'Not Set'}</p>
     <p>📅 Calendar Integration: ✅ Google Calendar</p>
     <p>🔑 Google Calendar Auth: ${googleTokens ? '✅ Authorized' : '❌ Not Authorized'}</p>
+    <p>🤖 Retell Functions: ✅ 15 Active Endpoints</p>
     <hr>
-    <h3>🔗 Available Endpoints:</h3>
+    <h3>🔗 Retell AI Function Endpoints:</h3>
     <ul>
-      <li><code>POST /webhook/ghl-bridge/bestbuyremodel</code> - Main GHL bridge with Google Calendar</li>
+      <li><code>POST /webhook/schedule-lead/bestbuyremodel</code> - Schedule appointment (Google Calendar)</li>
+      <li><code>POST /webhook/check-availability/bestbuyremodel</code> - Check calendar availability</li>
+      <li><code>POST /webhook/update-phone/bestbuyremodel</code> - Update lead phone</li>
+      <li><code>POST /webhook/validate-address/bestbuyremodel</code> - Validate lead address</li>
+      <li><code>POST /webhook/call-back-later/bestbuyremodel</code> - Schedule callback</li>
+      <li><code>POST /webhook/mark-wrong-number/bestbuyremodel</code> - Mark wrong number</li>
+      <li><code>POST /webhook/update-address/bestbuyremodel</code> - Update lead address</li>
+      <li><code>POST /webhook/mobile-home/bestbuyremodel</code> - Mark mobile home</li>
+      <li><code>POST /webhook/outside-area/bestbuyremodel</code> - Mark outside area</li>
+      <li><code>POST /webhook/not-interested/bestbuyremodel</code> - Mark not interested</li>
+      <li><code>POST /webhook/transfer-call/bestbuyremodel</code> - Transfer call</li>
+      <li><code>POST /webhook/update-first-name/bestbuyremodel</code> - Update first name</li>
+      <li><code>POST /webhook/update-last-name/bestbuyremodel</code> - Update last name</li>
+      <li><code>POST /webhook/update-email/bestbuyremodel</code> - Update email</li>
+      <li><code>POST /webhook/end-call/bestbuyremodel</code> - End call</li>
+    </ul>
+    <hr>
+    <h3>🔗 System Endpoints:</h3>
+    <ul>
+      <li><code>POST /webhook/ghl-bridge/bestbuyremodel</code> - Main GHL bridge</li>
       <li><code>POST /webhook/retell/bestbuyremodel</code> - Retell webhook</li>
-      <li><code>POST /webhook/book-appointment/bestbuyremodel</code> - Book Google Calendar appointments</li>
-      <li><code>GET /webhook/availability/bestbuyremodel</code> - Check Google Calendar availability</li>
-      <li><code>GET /webhook/test-google-calendar</code> - Test Google Calendar integration</li>
-      <li><code>GET /auth/google</code> - Get Google OAuth authorization URL</li>
+      <li><code>GET /webhook/test-google-calendar</code> - Test Google Calendar</li>
+      <li><code>GET /auth/google</code> - Google OAuth authorization</li>
     </ul>
     ${!googleTokens ? '<p><strong>⚠️ Please authorize Google Calendar: <a href="/auth/google">Click Here</a></strong></p>' : ''}
   `);
@@ -535,6 +1193,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Nuviao Bridge running on port ${PORT}`);
   console.log(`🎯 GHL Bridge ready with API contact creation!`);
   console.log(`📅 Google Calendar integration enabled!`);
+  console.log(`🤖 Retell AI functions: 15 endpoints active`);
   if (!googleTokens) {
     console.log(`⚠️ Visit /auth/google to authorize Google Calendar access`);
   }
