@@ -1,22 +1,28 @@
 {
-    "name": "nuviao-ai-lead-manager",
-    "version": "1.0.0",
-    "description": "GHL to Railway Bridge for AI Calling",
-    "main": "server.js",
-    "scripts": {
-      "start": "node server.js",
-      "dev": "nodemon server.js"
-    },
-    "dependencies": {
-      "express": "^4.18.2",
-      "cors": "^2.8.5",
-      "helmet": "^7.0.0",
-      "dotenv": "^16.3.1",
-      "@supabase/supabase-js": "^2.38.0",
-      "axios": "^1.5.0",
-      "moment-timezone": "^0.5.43"
-    },
-    "engines": {
-      "node": ">=18.0.0"
-    }
-  }
+  "name": "nuviao-ai-lead-manager",
+  "version": "1.0.0",
+  "description": "AI Lead Manager with Calendar Integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.0.0",
+    "axios": "^1.5.0",
+    "dotenv": "^16.3.1",
+    "@supabase/supabase-js": "^2.38.0",
+    "googleapis": "^128.0.0"
+  },
+  "keywords": [
+    "ai",
+    "lead-manager",
+    "ghl",
+    "calendar",
+    "automation"
+  ],
+  "author": "Nuviao LLC",
+  "license": "ISC"
+}
