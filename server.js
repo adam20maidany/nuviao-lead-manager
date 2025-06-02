@@ -50,13 +50,16 @@ const APPOINTMENT_CONFIG = {
   title: 'Estimate' // Will be "Estimate - John Smith"
 };
 
-async function makeGHLRequest(endpoint, method = 'GET', body = null) {
+async function makeGHLRequest(endpoint, method = 'GET', body = null, useLocationKey = false) {
   const url = `${GHL_BASE_URL}${endpoint}`;
+  
+  // Use Location API key for calendar endpoints, Agency key for others
+  const apiKey = useLocationKey ? process.env.GHL_LOCATION_API_KEY : process.env.GHL_API_KEY;
   
   const options = {
     method,
     headers: {
-      'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+      'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
       'Version': '2021-07-28'  // Add version header for v1 API
     }
@@ -68,7 +71,7 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
   
   try {
     console.log(`🔍 Making GHL request to: ${url}`);
-    console.log(`🔑 Using API key: ${process.env.GHL_API_KEY ? process.env.GHL_API_KEY.substring(0, 10) + '...' : 'MISSING'}`);
+    console.log(`🔑 Using ${useLocationKey ? 'Location' : 'Agency'} API key: ${apiKey ? apiKey.substring(0, 10) + '...' : 'MISSING'}`);
     
     const response = await fetch(url, options);
     const data = await response.json();
@@ -88,12 +91,12 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
 }
 
 async function getLocationCalendars() {
-  console.log('🔍 Using correct GHL v1 calendar endpoint...');
+  console.log('🔍 Using correct GHL v1 calendar endpoint with Location API key...');
   
   try {
-    // Use the correct v1 endpoint from documentation
-    console.log('🧪 Testing: /calendars/teams');
-    const result = await makeGHLRequest('/calendars/teams');
+    // Use Location API key for calendar access
+    console.log('🧪 Testing: /calendars/teams with Location API key');
+    const result = await makeGHLRequest('/calendars/teams', 'GET', null, true); // true = use location key
     
     if (result.success) {
       console.log('✅ SUCCESS with /calendars/teams');
@@ -107,7 +110,7 @@ async function getLocationCalendars() {
       
       // Try alternative - get appointments to find calendar info
       console.log('🧪 Trying appointments endpoint for calendar discovery...');
-      const appointmentsResult = await makeGHLRequest('/appointments');
+      const appointmentsResult = await makeGHLRequest('/appointments', 'GET', null, true); // true = use location key
       
       if (appointmentsResult.success) {
         console.log('✅ Appointments endpoint worked - extracting calendar info');
@@ -128,7 +131,7 @@ async function getLocationCalendars() {
 
 async function getCalendarEvents(calendarId, startDate, endDate) {
   const endpoint = `/calendars/${calendarId}/events?startDate=${startDate}&endDate=${endDate}`;
-  const result = await makeGHLRequest(endpoint);
+  const result = await makeGHLRequest(endpoint, 'GET', null, true); // Use location key for calendar events
   
   if (result.success) {
     return result.data.events || [];
@@ -300,7 +303,7 @@ ${callSummary}
       appointmentStatus: 'confirmed'
     };
     
-    const result = await makeGHLRequest(`/calendars/${primaryCalendar.id}/events`, 'POST', eventData);
+    const result = await makeGHLRequest(`/calendars/${primaryCalendar.id}/events`, 'POST', eventData, true); // Use location key for booking
     
     if (result.success) {
       console.log('✅ Appointment booked successfully:', result.data);
