@@ -7,6 +7,14 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Import Google Calendar integration
+const { 
+  getAuthUrl, 
+  getTokensFromCode, 
+  checkAvailabilityWithGoogle, 
+  bookAppointmentWithGoogle 
+} = require('./google-calendar');
+
 // Debug environment variables
 console.log('🔍 Environment check:');
 console.log('SUPABASE_URL exists:', !!process.env.SUPABASE_URL);
@@ -14,6 +22,11 @@ console.log('RETELL_API_KEY exists:', !!process.env.RETELL_API_KEY);
 console.log('RETELL_AGENT_ID exists:', !!process.env.RETELL_AGENT_ID);
 console.log('GHL_API_KEY exists:', !!process.env.GHL_API_KEY);
 console.log('GHL_LOCATION_ID exists:', !!process.env.GHL_LOCATION_ID);
+console.log('GOOGLE_CLIENT_ID exists:', !!process.env.GOOGLE_CLIENT_ID);
+console.log('GOOGLE_CLIENT_SECRET exists:', !!process.env.GOOGLE_CLIENT_SECRET);
+
+// Store Google tokens temporarily (in production, use database)
+let googleTokens = null;
 
 // Initialize Supabase
 let supabase = null;
@@ -33,371 +46,91 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 // ================================
-// 🆕 CALENDAR INTEGRATION FUNCTIONS
+// 🆕 GOOGLE CALENDAR OAUTH ROUTES
 // ================================
 
-const GHL_BASE_URL = 'https://rest.gohighlevel.com/v1';
-const LOCATION_ID = process.env.GHL_LOCATION_ID || process.env.LOCATION_ID || 'llj5AyvYH8kun6U6fX84';
-const BUSINESS_HOURS = {
-  start: 9, // 9 AM
-  end: 17,  // 5 PM
-  timezone: 'America/Los_Vegas' // Las Vegas timezone
-};
-
-const APPOINTMENT_CONFIG = {
-  duration: 60, // 1 hour in minutes
-  buffer: 60,   // 1 hour buffer between appointments
-  title: 'Estimate' // Will be "Estimate - John Smith"
-};
-
-async function makeGHLRequest(endpoint, method = 'GET', body = null, useLocationKey = false) {
-  const url = `${GHL_BASE_URL}${endpoint}`;
-  
-  // Use Location API key for calendar endpoints, Agency key for others
-  const apiKey = useLocationKey ? process.env.GHL_LOCATION_API_KEY : process.env.GHL_API_KEY;
-  
-  const options = {
-    method,
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'Version': '2021-07-28'  // Add version header for v1 API
-    }
-  };
-  
-  if (body && method !== 'GET') {
-    options.body = JSON.stringify(body);
-  }
-  
+// Step 1: Get Google OAuth authorization URL
+app.get('/auth/google', (req, res) => {
   try {
-    console.log(`🔍 Making GHL request to: ${url}`);
-    console.log(`🔑 Using ${useLocationKey ? 'Location' : 'Agency'} API key: ${apiKey ? apiKey.substring(0, 10) + '...' : 'MISSING'}`);
-    
-    const response = await fetch(url, options);
-    const data = await response.json();
-    
-    console.log(`📡 Response status: ${response.status}`);
-    console.log(`📦 Response data:`, data);
-    
-    if (!response.ok) {
-      throw new Error(`GHL API Error: ${response.status} - ${JSON.stringify(data)}`);
-    }
-    
-    return { success: true, data };
-  } catch (error) {
-    console.error('GHL API Request Failed:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-async function getLocationCalendars() {
-  console.log('🔍 Using correct GHL v1 calendar endpoint with Location API key...');
-  
-  try {
-    // Use Location API key for calendar access
-    console.log('🧪 Testing: /calendars/teams with Location API key');
-    const result = await makeGHLRequest('/calendars/teams', 'GET', null, true); // true = use location key
-    
-    if (result.success) {
-      console.log('✅ SUCCESS with /calendars/teams');
-      console.log('📅 Calendar data:', JSON.stringify(result.data, null, 2));
-      
-      // Handle different response structures
-      const calendars = result.data.teams || result.data.calendars || result.data || [];
-      return Array.isArray(calendars) ? calendars : [calendars];
-    } else {
-      console.log('❌ /calendars/teams failed:', result.error);
-      
-      // Try alternative - get appointments to find calendar info
-      console.log('🧪 Trying appointments endpoint for calendar discovery...');
-      const appointmentsResult = await makeGHLRequest('/appointments', 'GET', null, true); // true = use location key
-      
-      if (appointmentsResult.success) {
-        console.log('✅ Appointments endpoint worked - extracting calendar info');
-        console.log('📅 Appointments data:', JSON.stringify(appointmentsResult.data, null, 2));
-        
-        // Extract calendar IDs from appointments data
-        return appointmentsResult.data.appointments || appointmentsResult.data || [];
-      }
-    }
-    
-    return [];
-    
-  } catch (error) {
-    console.error('💥 getLocationCalendars error:', error.message);
-    return [];
-  }
-}
-
-async function getCalendarEvents(calendarId, startDate, endDate) {
-  const endpoint = `/calendars/${calendarId}/events?startDate=${startDate}&endDate=${endDate}`;
-  const result = await makeGHLRequest(endpoint, 'GET', null, true); // Use location key for calendar events
-  
-  if (result.success) {
-    return result.data.events || [];
-  }
-  
-  console.error('Failed to get events:', result.error);
-  return [];
-}
-
-function isBusinessHour(hour, minute = 0) {
-  return hour >= BUSINESS_HOURS.start && hour < BUSINESS_HOURS.end;
-}
-
-function isWeekday(date) {
-  const day = date.getDay();
-  return day >= 1 && day <= 5; // Monday = 1, Friday = 5
-}
-
-async function getAvailableSlots(calendarId, targetDate) {
-  const startOfDay = new Date(targetDate);
-  startOfDay.setHours(0, 0, 0, 0);
-  
-  const endOfDay = new Date(targetDate);
-  endOfDay.setHours(23, 59, 59, 999);
-  
-  const existingEvents = await getCalendarEvents(
-    calendarId, 
-    startOfDay.toISOString(), 
-    endOfDay.toISOString()
-  );
-  
-  const availableSlots = [];
-  
-  if (!isWeekday(new Date(targetDate))) {
-    return availableSlots; // No weekend appointments
-  }
-  
-  for (let hour = BUSINESS_HOURS.start; hour < BUSINESS_HOURS.end; hour++) {
-    const slotStart = new Date(targetDate);
-    slotStart.setHours(hour, 0, 0, 0);
-    
-    const slotEnd = new Date(slotStart);
-    slotEnd.setMinutes(slotEnd.getMinutes() + APPOINTMENT_CONFIG.duration);
-    
-    const hasConflict = existingEvents.some(event => {
-      const eventStart = new Date(event.startTime);
-      const eventEnd = new Date(event.endTime);
-      
-      const bufferStart = new Date(eventStart);
-      bufferStart.setMinutes(bufferStart.getMinutes() - APPOINTMENT_CONFIG.buffer);
-      
-      const bufferEnd = new Date(eventEnd);
-      bufferEnd.setMinutes(bufferEnd.getMinutes() + APPOINTMENT_CONFIG.buffer);
-      
-      return (slotStart < bufferEnd && slotEnd > bufferStart);
-    });
-    
-    if (!hasConflict) {
-      availableSlots.push({
-        startTime: slotStart.toISOString(),
-        endTime: slotEnd.toISOString(),
-        displayTime: slotStart.toLocaleTimeString('en-US', {
-          hour: 'numeric',
-          minute: '2-digit',
-          hour12: true
-        })
-      });
-    }
-  }
-  
-  return availableSlots;
-}
-
-async function findNextAvailableSlots(calendarId, daysAhead = 14) {
-  const availableSlots = [];
-  const today = new Date();
-  
-  for (let i = 0; i < daysAhead; i++) {
-    const checkDate = new Date(today);
-    checkDate.setDate(today.getDate() + i);
-    
-    const daySlots = await getAvailableSlots(calendarId, checkDate);
-    
-    if (daySlots.length > 0) {
-      availableSlots.push({
-        date: checkDate.toDateString(),
-        slots: daySlots
-      });
-    }
-    
-    if (availableSlots.length >= 5) break;
-  }
-  
-  return availableSlots;
-}
-
-async function checkAvailabilityForAI(daysAhead = 7) {
-  try {
-    const calendars = await getLocationCalendars();
-    
-    if (calendars.length === 0) {
-      throw new Error('No calendars found for location');
-    }
-    
-    const primaryCalendar = calendars[0];
-    const availability = await findNextAvailableSlots(primaryCalendar.id, daysAhead);
-    
-    return {
-      success: true,
-      calendar: primaryCalendar,
-      availability: availability,
-      message: `Found ${availability.length} days with available slots`
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-}
-
-async function bookEstimateAppointment(appointmentData) {
-  try {
-    const calendars = await getLocationCalendars();
-    
-    if (calendars.length === 0) {
-      throw new Error('No calendars found for location');
-    }
-    
-    const primaryCalendar = calendars[0];
-    
-    const {
-      clientName,
-      clientPhone,
-      clientEmail,
-      homeAddress,
-      estimateType,
-      callSummary,
-      startTime,
-      endTime
-    } = appointmentData;
-    
-    const title = `${APPOINTMENT_CONFIG.title} - ${clientName}`;
-    
-    const description = `
-🏠 ESTIMATE APPOINTMENT
-
-📋 Client Information:
-• Name: ${clientName}
-• Phone: ${clientPhone}
-• Email: ${clientEmail}
-• Address: ${homeAddress}
-
-🔨 Estimate Type: ${estimateType}
-
-📞 Call Summary:
-${callSummary}
-
-⏰ Scheduled by AI Lead Manager
-    `.trim();
-    
-    const eventData = {
-      title,
-      description,
-      startTime,
-      endTime,
-      locationId: LOCATION_ID,
-      contactId: appointmentData.contactId || null,
-      appointmentStatus: 'confirmed'
-    };
-    
-    const result = await makeGHLRequest(`/calendars/${primaryCalendar.id}/events`, 'POST', eventData, true); // Use location key for booking
-    
-    if (result.success) {
-      console.log('✅ Appointment booked successfully:', result.data);
-      return {
-        success: true,
-        appointmentId: result.data.id,
-        appointment: result.data
-      };
-    } else {
-      console.error('❌ Failed to book appointment:', result.error);
-      return {
-        success: false,
-        error: result.error
-      };
-    }
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-}
-
-// ================================
-// 🆕 NEW CALENDAR ENDPOINTS
-// ================================
-
-// Test calendar integration
-app.get('/webhook/test-calendar', async (req, res) => {
-  try {
-    console.log('🧪 Testing calendar integration...');
-    console.log('🔑 API Key check:', process.env.GHL_API_KEY ? 'Present' : 'MISSING');
-    console.log('📍 Location ID:', LOCATION_ID);
-    
-    const availability = await checkAvailabilityForAI(3);
+    const authUrl = getAuthUrl();
+    console.log('🔗 Google OAuth URL generated');
     res.json({
-      message: 'Calendar integration test',
-      availability: availability,
-      timestamp: new Date().toISOString(),
-      debug: {
-        api_key_present: !!process.env.GHL_API_KEY,
-        location_id: LOCATION_ID,
-        api_key_preview: process.env.GHL_API_KEY ? process.env.GHL_API_KEY.substring(0, 20) + '...' : 'MISSING'
-      }
+      success: true,
+      authUrl: authUrl,
+      message: 'Visit this URL to authorize Google Calendar access'
     });
   } catch (error) {
+    console.error('❌ Error generating auth URL:', error);
     res.status(500).json({
-      error: 'Calendar test failed',
-      details: error.message,
-      debug: {
-        api_key_present: !!process.env.GHL_API_KEY,
-        location_id: LOCATION_ID
-      }
+      success: false,
+      error: error.message
     });
   }
 });
 
-// Test basic API connection
-app.get('/webhook/test-api-basic', async (req, res) => {
+// Step 2: Handle Google OAuth callback
+app.get('/auth/google/callback', async (req, res) => {
+  const { code } = req.query;
+  
+  if (!code) {
+    return res.status(400).send('Authorization code not provided');
+  }
+  
   try {
-    console.log('🧪 Testing basic GHL API connection...');
+    console.log('🔑 Processing Google OAuth callback...');
+    const result = await getTokensFromCode(code);
     
-    // Test basic endpoints to see which ones work
-    const testEndpoints = [
-      '/ping',
-      '/users/me', 
-      '/locations',
-      '/calendars',
-      '/calendars/teams'
-    ];
-    
-    const results = {};
-    
-    for (const endpoint of testEndpoints) {
-      console.log(`🔍 Testing: ${endpoint}`);
-      const result = await makeGHLRequest(endpoint);
-      results[endpoint] = {
-        success: result.success,
-        status: result.success ? 'OK' : result.error
-      };
+    if (result.success) {
+      // Store tokens (in production, save to database)
+      googleTokens = result.tokens;
+      console.log('✅ Google Calendar access authorized successfully!');
+      
+      res.send(`
+        <h1>✅ Google Calendar Authorization Successful!</h1>
+        <p>You can now close this window.</p>
+        <p>Your AI Lead Manager now has access to Google Calendar!</p>
+        <script>window.close();</script>
+      `);
+    } else {
+      console.error('❌ Token exchange failed:', result.error);
+      res.status(500).send('Authorization failed: ' + result.error);
+    }
+  } catch (error) {
+    console.error('❌ OAuth callback error:', error);
+    res.status(500).send('Authorization error: ' + error.message);
+  }
+});
+
+// ================================
+// 🆕 GOOGLE CALENDAR API ENDPOINTS
+// ================================
+
+// Test Google Calendar integration
+app.get('/webhook/test-google-calendar', async (req, res) => {
+  try {
+    if (!googleTokens) {
+      return res.json({
+        success: false,
+        error: 'Google Calendar not authorized yet',
+        authUrl: getAuthUrl(),
+        message: 'Visit the authUrl to authorize Google Calendar access first'
+      });
     }
     
-    res.json({
-      message: 'Basic API connection test',
-      api_key_format: process.env.GHL_API_KEY ? process.env.GHL_API_KEY.substring(0, 20) + '...' : 'MISSING',
-      location_id: LOCATION_ID,
-      test_results: results,
-      timestamp: new Date().toISOString()
-    });
+    console.log('🧪 Testing Google Calendar integration...');
+    const availability = await checkAvailabilityWithGoogle(googleTokens, 3);
     
+    res.json({
+      message: 'Google Calendar integration test',
+      availability: availability,
+      timestamp: new Date().toISOString(),
+      authorized: true
+    });
   } catch (error) {
     res.status(500).json({
-      error: 'Basic API test failed',
-      details: error.message
+      error: 'Google Calendar test failed',
+      details: error.message,
+      authorized: !!googleTokens
     });
   }
 });
@@ -405,8 +138,16 @@ app.get('/webhook/test-api-basic', async (req, res) => {
 // Check availability endpoint
 app.get('/webhook/availability/bestbuyremodel', async (req, res) => {
   try {
+    if (!googleTokens) {
+      return res.status(401).json({
+        success: false,
+        error: 'Google Calendar not authorized',
+        authUrl: getAuthUrl()
+      });
+    }
+    
     const daysAhead = parseInt(req.query.days) || 7;
-    const availability = await checkAvailabilityForAI(daysAhead);
+    const availability = await checkAvailabilityWithGoogle(googleTokens, daysAhead);
     
     res.json(availability);
   } catch (error) {
@@ -421,7 +162,15 @@ app.get('/webhook/availability/bestbuyremodel', async (req, res) => {
 // Book appointment endpoint
 app.post('/webhook/book-appointment/bestbuyremodel', async (req, res) => {
   try {
-    console.log('📅 Booking appointment request:', req.body);
+    if (!googleTokens) {
+      return res.status(401).json({
+        success: false,
+        error: 'Google Calendar not authorized',
+        authUrl: getAuthUrl()
+      });
+    }
+    
+    console.log('📅 Booking Google Calendar appointment:', req.body);
     
     const {
       clientName,
@@ -457,18 +206,20 @@ app.post('/webhook/book-appointment/bestbuyremodel', async (req, res) => {
       contactId: ghlContactId
     };
 
-    const bookingResult = await bookEstimateAppointment(appointmentData);
+    const bookingResult = await bookAppointmentWithGoogle(googleTokens, appointmentData);
 
     if (bookingResult.success) {
-      console.log(`✅ Appointment booked for ${clientName} at ${startTime.toLocaleString()}`);
+      console.log(`✅ Google Calendar appointment booked for ${clientName} at ${startTime.toLocaleString()}`);
       
+      // Update lead status in database
       if (global.supabase && req.body.lead_id) {
         try {
           await global.supabase
             .from('leads')
             .update({ 
               status: 'appointment_booked',
-              appointment_time: startTime.toISOString()
+              appointment_time: startTime.toISOString(),
+              calendar_provider: 'Google Calendar'
             })
             .eq('id', req.body.lead_id);
         } catch (dbError) {
@@ -478,12 +229,13 @@ app.post('/webhook/book-appointment/bestbuyremodel', async (req, res) => {
 
       res.json({
         success: true,
-        message: 'Appointment booked successfully',
+        message: 'Appointment booked successfully in Google Calendar',
         appointmentId: bookingResult.appointmentId,
-        appointmentTime: startTime.toLocaleString()
+        appointmentTime: startTime.toLocaleString(),
+        calendarLink: bookingResult.calendarLink
       });
     } else {
-      console.error('❌ Failed to book appointment:', bookingResult.error);
+      console.error('❌ Failed to book Google Calendar appointment:', bookingResult.error);
       res.status(500).json({
         success: false,
         error: bookingResult.error
@@ -503,7 +255,7 @@ app.post('/webhook/book-appointment/bestbuyremodel', async (req, res) => {
 // EXISTING ENDPOINTS (UPDATED)
 // ================================
 
-// GHL BRIDGE WEBHOOK - WITH CALENDAR INTEGRATION
+// GHL BRIDGE WEBHOOK - WITH GOOGLE CALENDAR INTEGRATION
 app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
   try {
     console.log('🔗 GHL Bridge received data:', req.body);
@@ -558,21 +310,27 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
       }
     }
 
-    // Step 2: Create GHL contact via API
+    // Step 2: Create GHL contact via API (keep this working)
     let ghlContact = null;
-    if (process.env.GHL_API_KEY && LOCATION_ID) {
+    if (process.env.GHL_API_KEY && process.env.GHL_LOCATION_ID) {
       ghlContact = await createGHLContact(leadData);
     }
 
-    // 🆕 Step 3: Check calendar availability
-    console.log('📅 Checking calendar availability...');
-    const availability = await checkAvailabilityForAI(7);
-    
-    if (availability.success && availability.availability.length > 0) {
-      console.log(`✅ Found ${availability.availability.length} days with available slots`);
-      leadData.availability = availability.availability;
+    // 🆕 Step 3: Check Google Calendar availability (if authorized)
+    let availability = { success: false, availability: [] };
+    if (googleTokens) {
+      console.log('📅 Checking Google Calendar availability...');
+      availability = await checkAvailabilityWithGoogle(googleTokens, 7);
+      
+      if (availability.success && availability.availability.length > 0) {
+        console.log(`✅ Found ${availability.availability.length} days with available slots`);
+        leadData.availability = availability.availability;
+      } else {
+        console.log('⚠️ No availability found, Carl will handle scheduling manually');
+        leadData.availability = [];
+      }
     } else {
-      console.log('⚠️ No availability found, Carl will handle scheduling manually');
+      console.log('⚠️ Google Calendar not authorized - Carl will get manual scheduling');
       leadData.availability = [];
     }
 
@@ -582,11 +340,12 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
     // Step 5: Send response
     res.json({ 
       success: true, 
-      message: 'Lead processed, GHL contact created, availability checked, and AI call initiated',
+      message: 'Lead processed, GHL contact created, calendar checked, and AI call initiated',
       railway_lead_id: savedLead?.id,
       ghl_contact_id: ghlContact?.contact?.id,
       call_id: callResult.call_id,
       ghl_contact_created: !!ghlContact,
+      calendar_authorized: !!googleTokens,
       availability_slots: availability.success ? availability.availability.length : 0
     });
 
@@ -596,7 +355,7 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
   }
 });
 
-// Function to create GHL contact via API
+// Function to create GHL contact via API (unchanged)
 async function createGHLContact(leadData) {
   try {
     console.log(`📋 Creating GHL contact for ${leadData.name}`);
@@ -609,7 +368,7 @@ async function createGHLContact(leadData) {
       email: leadData.email || '',
       source: leadData.source,
       tags: ['AI Calling', 'Railway Import'],
-      locationId: LOCATION_ID
+      locationId: process.env.GHL_LOCATION_ID
     };
 
     console.log('📤 Sending to GHL API:', contactData);
@@ -641,7 +400,7 @@ async function createGHLContact(leadData) {
   }
 }
 
-// Function to initiate AI call via Retell
+// Function to initiate AI call via Retell (updated with Google Calendar data)
 async function initiateAICall(leadData, railwayLeadId, ghlContactId) {
   try {
     if (!process.env.RETELL_API_KEY || !process.env.RETELL_AGENT_ID) {
@@ -661,8 +420,9 @@ async function initiateAICall(leadData, railwayLeadId, ghlContactId) {
         full_name: leadData.name,
         phone: leadData.phone,
         email: leadData.email || '',
-        // 🆕 Include availability for Carl
-        calendar_availability: JSON.stringify(leadData.availability || [])
+        // 🆕 Include Google Calendar availability for Carl
+        calendar_availability: JSON.stringify(leadData.availability || []),
+        calendar_provider: 'Google Calendar'
       }
     }, {
       headers: {
@@ -711,7 +471,7 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
       console.log(`📞 Call ${call_id} ended with outcome: ${outcome}`);
       
       if (outcome === 'booked') {
-        console.log('🎉 Appointment was booked during call!');
+        console.log('🎉 Appointment was booked during call via Google Calendar!');
       }
     }
     
@@ -729,8 +489,10 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     service: 'Nuviao GHL-Railway Bridge',
     ghl_api_configured: !!process.env.GHL_API_KEY,
-    location_id: LOCATION_ID,
-    calendar_integration: true
+    location_id: process.env.GHL_LOCATION_ID,
+    google_calendar_configured: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+    google_calendar_authorized: !!googleTokens,
+    calendar_integration: 'Google Calendar'
   });
 });
 
@@ -740,7 +502,9 @@ app.get('/webhook/test', (req, res) => {
     message: 'GHL Bridge is working!',
     endpoint: '/webhook/ghl-bridge/bestbuyremodel',
     timestamp: new Date().toISOString(),
-    calendar_enabled: true
+    calendar_enabled: true,
+    calendar_provider: 'Google Calendar',
+    google_authorized: !!googleTokens
   });
 });
 
@@ -750,22 +514,28 @@ app.get('/', (req, res) => {
     <h1>🚀 Nuviao GHL-Railway Bridge</h1>
     <p>Status: ✅ Online</p>
     <p>GHL API: ${process.env.GHL_API_KEY ? '✅ Configured' : '❌ Not Configured'}</p>
-    <p>Location ID: ${LOCATION_ID || 'Not Set'}</p>
-    <p>📅 Calendar Integration: ✅ Enabled</p>
+    <p>Location ID: ${process.env.GHL_LOCATION_ID || 'Not Set'}</p>
+    <p>📅 Calendar Integration: ✅ Google Calendar</p>
+    <p>🔑 Google Calendar Auth: ${googleTokens ? '✅ Authorized' : '❌ Not Authorized'}</p>
     <hr>
     <h3>🔗 Available Endpoints:</h3>
     <ul>
-      <li><code>POST /webhook/ghl-bridge/bestbuyremodel</code> - Main GHL bridge with calendar</li>
+      <li><code>POST /webhook/ghl-bridge/bestbuyremodel</code> - Main GHL bridge with Google Calendar</li>
       <li><code>POST /webhook/retell/bestbuyremodel</code> - Retell webhook</li>
-      <li><code>POST /webhook/book-appointment/bestbuyremodel</code> - Book appointments</li>
-      <li><code>GET /webhook/availability/bestbuyremodel</code> - Check availability</li>
-      <li><code>GET /webhook/test-calendar</code> - Test calendar integration</li>
+      <li><code>POST /webhook/book-appointment/bestbuyremodel</code> - Book Google Calendar appointments</li>
+      <li><code>GET /webhook/availability/bestbuyremodel</code> - Check Google Calendar availability</li>
+      <li><code>GET /webhook/test-google-calendar</code> - Test Google Calendar integration</li>
+      <li><code>GET /auth/google</code> - Get Google OAuth authorization URL</li>
     </ul>
+    ${!googleTokens ? '<p><strong>⚠️ Please authorize Google Calendar: <a href="/auth/google">Click Here</a></strong></p>' : ''}
   `);
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 Nuviao Bridge running on port ${PORT}`);
   console.log(`🎯 GHL Bridge ready with API contact creation!`);
-  console.log(`📅 Calendar integration enabled!`);
+  console.log(`📅 Google Calendar integration enabled!`);
+  if (!googleTokens) {
+    console.log(`⚠️ Visit /auth/google to authorize Google Calendar access`);
+  }
 });
