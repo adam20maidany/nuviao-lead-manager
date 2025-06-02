@@ -32,10 +32,47 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// GHL BRIDGE WEBHOOK - WITH API CONTACT CREATION
-app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
+// 🆕 Import and use the webhook router with calendar integration
+const webhookRouter = require('./webhook');
+app.use('/webhook', webhookRouter);
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    service: 'Nuviao GHL-Railway Bridge',
+    ghl_api_configured: !!process.env.GHL_API_KEY,
+    location_id: process.env.GHL_LOCATION_ID,
+    calendar_integration: true // 🆕 NEW: Shows calendar is enabled
+  });
+});
+
+// Simple homepage
+app.get('/', (req, res) => {
+  res.send(`
+    <h1>🚀 Nuviao GHL-Railway Bridge</h1>
+    <p>Status: ✅ Online</p>
+    <p>GHL API: ${process.env.GHL_API_KEY ? '✅ Configured' : '❌ Not Configured'}</p>
+    <p>Location ID: ${process.env.GHL_LOCATION_ID || 'Not Set'}</p>
+    <p>📅 Calendar Integration: ✅ Enabled</p>
+    <hr>
+    <h3>🔗 Available Endpoints:</h3>
+    <ul>
+      <li><code>POST /webhook/ghl-bridge/bestbuyremodel</code> - Main GHL bridge</li>
+      <li><code>POST /webhook/retell/bestbuyremodel</code> - Retell webhook</li>
+      <li><code>POST /webhook/book-appointment/bestbuyremodel</code> - Book appointments</li>
+      <li><code>GET /webhook/availability/bestbuyremodel</code> - Check availability</li>
+      <li><code>GET /webhook/test-calendar</code> - Test calendar integration</li>
+    </ul>
+  `);
+});
+
+// 🆕 BACKUP: Keep the original GHL bridge here for compatibility
+// (Remove this once you confirm the router version works)
+app.post('/backup-webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
   try {
-    console.log('🔗 GHL Bridge received data:', req.body);
+    console.log('🔗 BACKUP GHL Bridge received data:', req.body);
     
     // Extract lead data
     const leadData = {
@@ -99,7 +136,7 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
     // Step 4: Send response
     res.json({ 
       success: true, 
-      message: 'Lead processed, GHL contact created, and AI call initiated',
+      message: 'Lead processed, GHL contact created, and AI call initiated (BACKUP)',
       railway_lead_id: savedLead?.id,
       ghl_contact_id: ghlContact?.contact?.id,
       call_id: callResult.call_id,
@@ -233,29 +270,8 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
   }
 });
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    service: 'Nuviao GHL-Railway Bridge',
-    ghl_api_configured: !!process.env.GHL_API_KEY,
-    location_id: process.env.GHL_LOCATION_ID
-  });
-});
-
-// Simple homepage
-app.get('/', (req, res) => {
-  res.send(`
-    <h1>🚀 Nuviao GHL-Railway Bridge</h1>
-    <p>Status: ✅ Online</p>
-    <p>GHL API: ${process.env.GHL_API_KEY ? '✅ Configured' : '❌ Not Configured'}</p>
-    <p>Location ID: ${process.env.GHL_LOCATION_ID || 'Not Set'}</p>
-    <p>GHL Bridge Endpoint: <code>/webhook/ghl-bridge/bestbuyremodel</code></p>
-  `);
-});
-
 app.listen(PORT, () => {
   console.log(`🚀 Nuviao Bridge running on port ${PORT}`);
   console.log(`🎯 GHL Bridge ready with API contact creation!`);
+  console.log(`📅 Calendar integration enabled via router!`);
 });
