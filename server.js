@@ -57,7 +57,8 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
     method,
     headers: {
       'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'Version': '2021-07-28'  // Add version header for v1 API
     }
   };
   
@@ -66,8 +67,14 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
   }
   
   try {
+    console.log(`🔍 Making GHL request to: ${url}`);
+    console.log(`🔑 Using API key: ${process.env.GHL_API_KEY ? process.env.GHL_API_KEY.substring(0, 10) + '...' : 'MISSING'}`);
+    
     const response = await fetch(url, options);
     const data = await response.json();
+    
+    console.log(`📡 Response status: ${response.status}`);
+    console.log(`📦 Response data:`, data);
     
     if (!response.ok) {
       throw new Error(`GHL API Error: ${response.status} - ${JSON.stringify(data)}`);
@@ -81,14 +88,29 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
 }
 
 async function getLocationCalendars() {
-  // Try the correct v1 calendar endpoint
-  const result = await makeGHLRequest(`/calendars/teams`);
+  console.log('🔍 Trying multiple calendar endpoints...');
   
-  if (result.success) {
-    return result.data.calendars || result.data.teams || result.data || [];
+  // Try different endpoints for Agency vs Location APIs
+  const endpoints = [
+    '/calendars/teams',           // Location API
+    '/calendars',                 // Generic calendars
+    `/locations/${LOCATION_ID}/calendars`,  // Location-specific
+    '/calendars/calendar',        // Alternative endpoint
+  ];
+  
+  for (const endpoint of endpoints) {
+    console.log(`🧪 Testing endpoint: ${endpoint}`);
+    const result = await makeGHLRequest(endpoint);
+    
+    if (result.success) {
+      console.log(`✅ Success with endpoint: ${endpoint}`);
+      return result.data.calendars || result.data.teams || result.data || [];
+    } else {
+      console.log(`❌ Failed with ${endpoint}: ${result.error}`);
+    }
   }
   
-  console.error('Failed to get calendars:', result.error);
+  console.error('❌ All calendar endpoints failed');
   return [];
 }
 
@@ -297,15 +319,69 @@ ${callSummary}
 // Test calendar integration
 app.get('/webhook/test-calendar', async (req, res) => {
   try {
+    console.log('🧪 Testing calendar integration...');
+    console.log('🔑 API Key check:', process.env.GHL_API_KEY ? 'Present' : 'MISSING');
+    console.log('📍 Location ID:', LOCATION_ID);
+    
     const availability = await checkAvailabilityForAI(3);
     res.json({
       message: 'Calendar integration test',
       availability: availability,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      debug: {
+        api_key_present: !!process.env.GHL_API_KEY,
+        location_id: LOCATION_ID,
+        api_key_preview: process.env.GHL_API_KEY ? process.env.GHL_API_KEY.substring(0, 20) + '...' : 'MISSING'
+      }
     });
   } catch (error) {
     res.status(500).json({
       error: 'Calendar test failed',
+      details: error.message,
+      debug: {
+        api_key_present: !!process.env.GHL_API_KEY,
+        location_id: LOCATION_ID
+      }
+    });
+  }
+});
+
+// Test basic API connection
+app.get('/webhook/test-api-basic', async (req, res) => {
+  try {
+    console.log('🧪 Testing basic GHL API connection...');
+    
+    // Test basic endpoints to see which ones work
+    const testEndpoints = [
+      '/ping',
+      '/users/me', 
+      '/locations',
+      '/calendars',
+      '/calendars/teams'
+    ];
+    
+    const results = {};
+    
+    for (const endpoint of testEndpoints) {
+      console.log(`🔍 Testing: ${endpoint}`);
+      const result = await makeGHLRequest(endpoint);
+      results[endpoint] = {
+        success: result.success,
+        status: result.success ? 'OK' : result.error
+      };
+    }
+    
+    res.json({
+      message: 'Basic API connection test',
+      api_key_format: process.env.GHL_API_KEY ? process.env.GHL_API_KEY.substring(0, 20) + '...' : 'MISSING',
+      location_id: LOCATION_ID,
+      test_results: results,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      error: 'Basic API test failed',
       details: error.message
     });
   }
