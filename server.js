@@ -88,66 +88,34 @@ async function makeGHLRequest(endpoint, method = 'GET', body = null) {
 }
 
 async function getLocationCalendars() {
-  console.log('🔍 Getting calendars via locations endpoint...');
+  console.log('🔍 Using correct GHL v1 calendar endpoint...');
   
   try {
-    // First, get all locations (this works!)
-    const locationsResult = await makeGHLRequest('/locations');
+    // Use the correct v1 endpoint from documentation
+    console.log('🧪 Testing: /calendars/teams');
+    const result = await makeGHLRequest('/calendars/teams');
     
-    if (!locationsResult.success) {
-      console.error('❌ Failed to get locations:', locationsResult.error);
-      return [];
-    }
-    
-    console.log('✅ Got locations data successfully');
-    
-    // Find our specific location
-    const locations = locationsResult.data.locations || [locationsResult.data];
-    const targetLocation = locations.find(loc => loc.id === LOCATION_ID) || locations[0];
-    
-    if (!targetLocation) {
-      console.error('❌ Target location not found');
-      return [];
-    }
-    
-    console.log('🎯 Using location:', targetLocation.name, targetLocation.id);
-    
-    // Try location-specific calendar endpoints
-    const calendarEndpoints = [
-      `/locations/${targetLocation.id}/calendars`,
-      `/calendars?locationId=${targetLocation.id}`,
-      `/calendars/${targetLocation.id}`,
-      `/locations/${targetLocation.id}/calendar`,
-    ];
-    
-    for (const endpoint of calendarEndpoints) {
-      try {
-        console.log(`🧪 Testing calendar endpoint: ${endpoint}`);
-        const result = await makeGHLRequest(endpoint);
+    if (result.success) {
+      console.log('✅ SUCCESS with /calendars/teams');
+      console.log('📅 Calendar data:', JSON.stringify(result.data, null, 2));
+      
+      // Handle different response structures
+      const calendars = result.data.teams || result.data.calendars || result.data || [];
+      return Array.isArray(calendars) ? calendars : [calendars];
+    } else {
+      console.log('❌ /calendars/teams failed:', result.error);
+      
+      // Try alternative - get appointments to find calendar info
+      console.log('🧪 Trying appointments endpoint for calendar discovery...');
+      const appointmentsResult = await makeGHLRequest('/appointments');
+      
+      if (appointmentsResult.success) {
+        console.log('✅ Appointments endpoint worked - extracting calendar info');
+        console.log('📅 Appointments data:', JSON.stringify(appointmentsResult.data, null, 2));
         
-        if (result.success) {
-          console.log(`✅ SUCCESS with: ${endpoint}`);
-          console.log(`📅 Calendar data:`, JSON.stringify(result.data, null, 2));
-          return result.data.calendars || result.data || [];
-        } else {
-          console.log(`❌ FAILED ${endpoint}:`, result.error);
-        }
-      } catch (endpointError) {
-        console.log(`💥 ERROR testing ${endpoint}:`, endpointError.message);
+        // Extract calendar IDs from appointments data
+        return appointmentsResult.data.appointments || appointmentsResult.data || [];
       }
-    }
-    
-    console.error('❌ All calendar endpoints failed - trying simple calendars endpoint');
-    
-    // Last attempt - try simple calendars
-    try {
-      const simpleResult = await makeGHLRequest('/calendars');
-      if (simpleResult.success) {
-        console.log('✅ Simple calendars worked:', simpleResult.data);
-        return simpleResult.data.calendars || simpleResult.data || [];
-      }
-    } catch (finalError) {
-      console.log('💥 Final calendars attempt failed:', finalError.message);
     }
     
     return [];
