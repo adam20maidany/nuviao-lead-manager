@@ -30,51 +30,15 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Test PIT token without specifying location ID
-app.get('/debug/test-pit-no-location', async (req, res) => {
-  try {
-    console.log('🧪 Testing PIT token without location ID...');
-    
-    // Test 1: Try to get contacts without location filter
-    const response = await axios.get(
-      'https://services.leadconnectorhq.com/contacts/?limit=5',
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-          'Version': '2021-07-28',
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    res.json({
-      success: true,
-      message: 'PIT token works without location ID!',
-      contacts_found: response.data.contacts?.length || 0,
-      test_result: 'PIT token has automatic location access',
-      next_step: 'Try creating contact without location ID'
-    });
-    
-  } catch (error) {
-    console.error('❌ PIT token test failed:', error.response?.data);
-    
-    res.json({
-      success: false,
-      error_status: error.response?.status,
-      error_message: error.response?.data,
-      troubleshooting: {
-        check_1: 'Verify Private Integration was created in correct sub-account',
-        check_2: 'Confirm integration has contacts.read and contacts.write permissions',
-        check_3: 'Make sure you copied the token correctly'
-      }
-    });
-  }
-});
+// ========================================
+// FUNCTION DEFINITIONS (BEFORE ROUTES)
+// ========================================
 
-// Updated contact creation function - try without location ID
-async function createGHLContactWithPIT(leadData) {
+// Function to create GHL contact via Private Integration Token
+async function createGHLContact(leadData) {
   try {
-    console.log(`📋 Creating GHL contact for ${leadData.name} using PIT (no location ID)`);
+    console.log(`📋 Creating GHL contact for ${leadData.name} using Private Integration Token`);
+    console.log('🔍 PIT Token Check:', process.env.GHL_API_KEY ? 'SET' : 'MISSING');
 
     const nameParts = leadData.name.split(' ');
     const contactData = {
@@ -84,10 +48,10 @@ async function createGHLContactWithPIT(leadData) {
       email: leadData.email || '',
       source: leadData.source || 'Railway Import',
       tags: ['AI Calling', 'Railway Import']
-      // Removed locationId - PIT token should handle this automatically
+      // No locationId needed - PIT token handles this automatically
     };
 
-    console.log('📤 Sending to GHL API with PIT (no location):', contactData);
+    console.log('📤 Sending to GHL API with PIT token:', contactData);
 
     const response = await axios.post(
       'https://services.leadconnectorhq.com/contacts/',
@@ -101,16 +65,172 @@ async function createGHLContactWithPIT(leadData) {
       }
     );
 
-    console.log(`✅ GHL contact created with PIT: ${response.data.contact?.id || response.data.id}`);
+    console.log(`✅ GHL contact created successfully: ${response.data.contact?.id || response.data.id}`);
     return response.data;
 
   } catch (error) {
-    console.error('❌ PIT contact creation failed (no location):', error.response?.data);
+    console.error('❌ GHL contact creation failed:', error.response?.data || error.message);
+    
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response data:', error.response.data);
+    }
+    
     return null;
   }
 }
 
-// Google Calendar OAuth
+// Function to initiate AI call
+async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
+  try {
+    if (!process.env.RETELL_API_KEY || !process.env.RETELL_AGENT_ID) {
+      return { success: false, error: 'Retell not configured' };
+    }
+
+    console.log(`📞 Calling Retell AI for ${leadData.name} at ${leadData.phone}`);
+    
+    // Ensure all metadata fields are strings
+    const metadata = {
+      railway_lead_id: String(railwayLeadId || ''),
+      ghl_contact_id: String(ghlContactId || ''),
+      uuid: String(uuid || ''),
+      first_name: String(leadData.name.split(' ')[0] || ''),
+      last_name: String(leadData.name.split(' ').slice(1).join(' ') || ''),
+      full_name: String(leadData.name || ''),
+      phone: String(leadData.phone || ''),
+      email: String(leadData.email || ''),
+      full_address: String(leadData.full_address || 'Address to be confirmed'),
+      project_type: String(leadData.project_type || 'General Inquiry'),
+      project_notes: String(leadData.project_notes || 'Lead inquiry'),
+      calendar_availability: JSON.stringify(leadData.availability || []),
+      calendar_provider: 'Google Calendar'
+    };
+    
+    console.log('🚀 METADATA BEING SENT TO CARL:');
+    console.log('📝 first_name:', metadata.first_name);
+    console.log('📝 last_name:', metadata.last_name);
+    console.log('📝 full_name:', metadata.full_name);
+    console.log('📝 phone:', metadata.phone);
+    console.log('📝 email:', metadata.email);
+    console.log('📝 project_type:', metadata.project_type);
+    console.log('📝 project_notes:', metadata.project_notes);
+    console.log('📝 full_address:', metadata.full_address);
+    console.log('📝 uuid:', metadata.uuid);
+    
+    const response = await axios.post('https://api.retellai.com/v2/create-phone-call', {
+      from_number: '+17252092232',
+      to_number: leadData.phone,
+      agent_id: process.env.RETELL_AGENT_ID,
+      metadata: metadata
+    }, {
+      headers: {
+        'Authorization': `Bearer ${process.env.RETELL_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log(`✅ AI call initiated successfully: ${response.data.call_id}`);
+    
+    return { 
+      success: true, 
+      call_id: response.data.call_id 
+    };
+
+  } catch (error) {
+    console.error(`❌ AI call failed:`, error.response?.data || error.message);
+    return { 
+      success: false, 
+      error: error.response?.data || error.message 
+    };
+  }
+}
+
+// ========================================
+// DEBUG AND TEST ENDPOINTS
+// ========================================
+
+// Test PIT token functionality
+app.get('/debug/test-pit-token', async (req, res) => {
+  try {
+    console.log('🧪 Testing Private Integration Token...');
+    
+    const response = await axios.get(
+      'https://services.leadconnectorhq.com/contacts/?limit=1',
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Version': '2021-07-28',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    res.json({
+      success: true,
+      message: 'PIT token is working!',
+      token_prefix: process.env.GHL_API_KEY?.substring(0, 8) + '...',
+      contacts_found: response.data.contacts?.length || 0
+    });
+    
+  } catch (error) {
+    res.json({
+      success: false,
+      error_status: error.response?.status,
+      error_message: error.response?.data,
+      token_prefix: process.env.GHL_API_KEY?.substring(0, 8) + '...',
+      troubleshooting: {
+        if_401: 'PIT token is invalid or expired',
+        if_403: 'PIT token lacks required permissions (contacts.read/write)',
+        solution: 'Check Private Integration settings in GHL'
+      }
+    });
+  }
+});
+
+// Simple GHL contact creation test
+app.post('/debug/test-ghl-contact', async (req, res) => {
+  try {
+    console.log('🧪 Testing GHL contact creation directly...');
+    
+    const { full_name, phone, email } = req.body;
+    
+    const testLeadData = {
+      name: full_name || 'Test Customer',
+      phone: phone || '+1234567890',
+      email: email || 'test@example.com',
+      source: 'direct_test'
+    };
+    
+    const result = await createGHLContact(testLeadData);
+    
+    if (result) {
+      res.json({
+        success: true,
+        message: 'GHL contact created successfully',
+        contact_id: result.contact?.id || result.id,
+        result: result
+      });
+    } else {
+      res.json({
+        success: false,
+        message: 'GHL contact creation failed - check logs for details'
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ GHL test error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data || 'No additional details'
+    });
+  }
+});
+
+// ========================================
+// GOOGLE CALENDAR ENDPOINTS
+// ========================================
+
 app.get('/auth/google', (req, res) => {
   try {
     const authUrl = getAuthUrl();
@@ -137,7 +257,6 @@ app.get('/auth/google/callback', async (req, res) => {
   }
 });
 
-// Test Google Calendar integration
 app.get('/webhook/test-google-calendar', async (req, res) => {
   try {
     if (!googleTokens) {
@@ -167,7 +286,10 @@ app.get('/webhook/test-google-calendar', async (req, res) => {
   }
 });
 
+// ========================================
 // RETELL WEBHOOK
+// ========================================
+
 app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
   try {
     console.log('🤖 Retell webhook received:', req.body.event_type);
@@ -194,7 +316,6 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
       // Record call outcome for AI learning
       if (metadata?.uuid && global.supabase) {
         try {
-          // Get lead ID from UUID
           const { data: lead } = await global.supabase
             .from('leads')
             .select('id')
@@ -209,7 +330,6 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
               notes: call_analysis?.summary || ''
             });
 
-            // If call failed, schedule smart callbacks
             const callbackTriggers = ['no_answer', 'follow_up'];
             if (callbackTriggers.includes(outcome)) {
               await initializeCallback(lead.id, outcome);
@@ -233,7 +353,10 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
   }
 });
 
-// Retell Custom Functions
+// ========================================
+// RETELL CUSTOM FUNCTIONS
+// ========================================
+
 app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
   try {
     const { call, args } = req.body;
@@ -273,8 +396,6 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
       if (bookingResult.success) {
         console.log(`✅ Google Calendar appointment booked for ${leadInfo.clientName}`);
         
-        // Record successful appointment booking
-        let leadId = null;
         if (global.supabase) {
           try {
             const { data } = await global.supabase
@@ -282,7 +403,7 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
               .select('id')
               .eq('custom_fields->uuid', uuid)
               .single();
-            leadId = data?.id;
+            const leadId = data?.id;
             
             if (leadId) {
               await recordCall(leadId, {
@@ -294,7 +415,6 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
               });
             }
             
-            // Update lead status
             await global.supabase
               .from('leads')
               .update({ 
@@ -345,7 +465,6 @@ app.post('/webhook/check-availability/bestbuyremodel', async (req, res) => {
     }
 
     if (googleTokens) {
-      // Check Google Calendar availability for specific date
       const availability = await checkAvailabilityWithGoogle(googleTokens, 7);
       
       if (availability.success) {
@@ -431,11 +550,10 @@ app.post('/webhook/validate-address/bestbuyremodel', async (req, res) => {
       return res.json({ result: 'Could you please provide your address so I can verify we service your area?' });
     }
 
-    // Simple validation - check if it contains Las Vegas area
     const isLasVegas = address.toLowerCase().includes('las vegas') || 
                       address.toLowerCase().includes('henderson') ||
                       address.toLowerCase().includes('summerlin') ||
-                      /89\d{3}/.test(address); // Las Vegas ZIP codes
+                      /89\d{3}/.test(address);
 
     if (isLasVegas) {
       res.json({ result: 'Excellent! Your address is within our service area. We will be able to provide you with a free in-home estimate.' });
@@ -456,7 +574,6 @@ app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
     
     console.log('📞 Callback metadata:', call?.metadata);
     
-    // Get lead ID for smart callback scheduling
     let leadId = null;
     if (global.supabase && uuid) {
       const { data } = await global.supabase
@@ -467,7 +584,6 @@ app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
       leadId = data?.id;
     }
 
-    // Record the callback request and schedule smart callbacks
     if (leadId) {
       await recordCall(leadId, {
         callTime: new Date().toISOString(),
@@ -476,7 +592,6 @@ app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
         notes: `Callback requested for: ${proposed_callback_time || 'later'}`
       });
 
-      // Schedule smart callbacks using AI predictions
       await initializeCallback(leadId, 'callback_requested');
       console.log(`🧠 Smart callbacks scheduled for lead ${leadId}`);
     }
@@ -543,7 +658,6 @@ app.post('/webhook/not-interested/bestbuyremodel', async (req, res) => {
     const { call } = req.body;
     const uuid = call?.metadata?.uuid;
     
-    // Mark lead as not interested in database
     if (global.supabase && uuid) {
       await global.supabase
         .from('leads')
@@ -648,7 +762,10 @@ app.post('/webhook/end-call/bestbuyremodel', async (req, res) => {
   }
 });
 
-// GHL Bridge Webhook
+// ========================================
+// GHL BRIDGE WEBHOOK (MAIN ENTRY POINT)
+// ========================================
+
 app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
   try {
     console.log('🔗 GHL Bridge received data:', req.body);
@@ -670,9 +787,9 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
 
     console.log(`📞 Processing lead: ${leadData.name} - ${leadData.phone}`);
 
-    // Create GHL contact via API
+    // Create GHL contact via Private Integration Token
     let ghlContact = null;
-    if (process.env.GHL_API_KEY && process.env.GHL_LOCATION_ID) {
+    if (process.env.GHL_API_KEY) {
       ghlContact = await createGHLContact(leadData);
     }
 
@@ -754,7 +871,7 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
       success: true, 
       message: 'Lead processed, GHL contact created, calendar checked, and AI call initiated',
       railway_lead_id: savedLead?.id,
-      ghl_contact_id: ghlContact?.contact?.id,
+      ghl_contact_id: ghlContact?.contact?.id || ghlContact?.id,
       call_id: callResult.call_id,
       uuid: savedLead?.custom_fields?.uuid,
       ghl_contact_created: !!ghlContact,
@@ -768,72 +885,10 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
   }
 });
 
-// Function to initiate AI call
-async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
-  try {
-    if (!process.env.RETELL_API_KEY || !process.env.RETELL_AGENT_ID) {
-      return { success: false, error: 'Retell not configured' };
-    }
+// ========================================
+// SMART CALLBACK ENDPOINTS
+// ========================================
 
-    console.log(`📞 Calling Retell AI for ${leadData.name} at ${leadData.phone}`);
-    
-    // FIXED: Ensure all metadata fields are strings
-    const metadata = {
-      railway_lead_id: String(railwayLeadId || ''),
-      ghl_contact_id: String(ghlContactId || ''),
-      uuid: String(uuid || ''),
-      first_name: String(leadData.name.split(' ')[0] || ''),
-      last_name: String(leadData.name.split(' ').slice(1).join(' ') || ''),
-      full_name: String(leadData.name || ''),
-      phone: String(leadData.phone || ''),
-      email: String(leadData.email || ''),
-      full_address: String(leadData.full_address || 'Address to be confirmed'),
-      project_type: String(leadData.project_type || 'General Inquiry'),
-      project_notes: String(leadData.project_notes || 'Lead inquiry'),
-      calendar_availability: JSON.stringify(leadData.availability || []),
-      calendar_provider: 'Google Calendar'
-    };
-    
-    console.log('🚀 METADATA BEING SENT TO CARL:');
-    console.log('📝 first_name:', metadata.first_name);
-    console.log('📝 last_name:', metadata.last_name);
-    console.log('📝 full_name:', metadata.full_name);
-    console.log('📝 phone:', metadata.phone);
-    console.log('📝 email:', metadata.email);
-    console.log('📝 project_type:', metadata.project_type);
-    console.log('📝 project_notes:', metadata.project_notes);
-    console.log('📝 full_address:', metadata.full_address);
-    console.log('📝 uuid:', metadata.uuid);
-    
-    const response = await axios.post('https://api.retellai.com/v2/create-phone-call', {
-      from_number: '+17252092232',
-      to_number: leadData.phone,
-      agent_id: process.env.RETELL_AGENT_ID,
-      metadata: metadata
-    }, {
-      headers: {
-        'Authorization': `Bearer ${process.env.RETELL_API_KEY}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    console.log(`✅ AI call initiated successfully: ${response.data.call_id}`);
-    
-    return { 
-      success: true, 
-      call_id: response.data.call_id 
-    };
-
-  } catch (error) {
-    console.error(`❌ AI call failed:`, error.response?.data || error.message);
-    return { 
-      success: false, 
-      error: error.response?.data || error.message 
-    };
-  }
-}
-
-// Smart Callback Endpoints
 app.get('/webhook/optimal-call-times/:leadId', async (req, res) => {
   try {
     const { leadId } = req.params;
@@ -905,46 +960,82 @@ app.get('/webhook/callback-queue', async (req, res) => {
   }
 });
 
-// Test endpoints
+// ========================================
+// SYSTEM STATUS AND HEALTH ENDPOINTS
+// ========================================
+
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    system: 'Nuviao AI Lead Manager'
+  });
 });
 
 app.get('/', (req, res) => {
   res.send(`
-    <h1>🚀 Nuviao GHL-Railway Bridge</h1>
-    <p>Status: ✅ Online</p>
-    <p>Google Calendar Auth: ${googleTokens ? '✅ Authorized' : '❌ Not Authorized'}</p>
-    ${!googleTokens ? '<p><a href="/auth/google">Authorize Google Calendar</a></p>' : ''}
-    <h2>System Status:</h2>
+    <h1>🚀 Nuviao AI Lead Manager</h1>
+    <p><strong>Status:</strong> ✅ Online and Running</p>
+    <p><strong>Version:</strong> 2.0 - Private Integration Token Ready</p>
+    
+    <h2>🔌 System Integrations:</h2>
     <ul>
-      <li>Database: ${global.supabase ? '✅' : '❌'} ${global.supabase ? 'Connected' : 'Not Connected'}</li>
-      <li>Retell API: ${process.env.RETELL_API_KEY ? '✅' : '❌'} ${process.env.RETELL_API_KEY ? 'Configured' : 'Not Configured'}</li>
-      <li>GHL API: ${process.env.GHL_API_KEY ? '✅' : '❌'} ${process.env.GHL_API_KEY ? 'Configured' : 'Not Configured'}</li>
-      <li>Functions Active: ✅ 15 Retell Functions</li>
-      <li>Smart Callbacks: ✅ AI Algorithm Active</li>
+      <li><strong>Database:</strong> ${global.supabase ? '✅ Connected' : '❌ Not Connected'}</li>
+      <li><strong>Retell AI:</strong> ${process.env.RETELL_API_KEY ? '✅ Configured' : '❌ Not Configured'}</li>
+      <li><strong>GHL Private Integration:</strong> ${process.env.GHL_API_KEY ? '✅ PIT Token Set' : '❌ Not Configured'}</li>
+      <li><strong>Google Calendar:</strong> ${googleTokens ? '✅ Authorized' : '❌ Not Authorized'}</li>
+    </ul>
+    
+    <h2>🤖 AI Functions:</h2>
+    <ul>
+      <li>✅ 15 Retell Custom Functions Active</li>
+      <li>✅ Smart Callback Algorithm Active</li>
+      <li>✅ Google Calendar Integration Ready</li>
+      <li>✅ Lead Processing Pipeline Active</li>
+    </ul>
+    
+    <h2>🔗 Quick Links:</h2>
+    <ul>
+      ${!googleTokens ? '<li><a href="/auth/google">🔐 Authorize Google Calendar</a></li>' : ''}
+      <li><a href="/debug/test-pit-token">🧪 Test PIT Token</a></li>
+      <li><a href="/webhook/test-google-calendar">📅 Test Calendar</a></li>
+      <li><a href="/health">❤️ Health Check</a></li>
+    </ul>
+    
+    <h2>📊 Current Configuration:</h2>
+    <ul>
+      <li><strong>PIT Token:</strong> ${process.env.GHL_API_KEY ? process.env.GHL_API_KEY.substring(0, 8) + '...' : 'Not Set'}</li>
+      <li><strong>Agent ID:</strong> ${process.env.RETELL_AGENT_ID ? 'Configured' : 'Missing'}</li>
+      <li><strong>Database:</strong> ${process.env.SUPABASE_URL ? 'Connected' : 'Missing'}</li>
     </ul>
   `);
 });
 
+// ========================================
+// SERVER STARTUP
+// ========================================
+
 app.listen(PORT, () => {
-  console.log(`🚀 Nuviao Bridge running on port ${PORT}`);
-  console.log(`📅 Google Calendar integration enabled!`);
-  console.log(`🤖 Retell AI functions: 15 endpoints active`);
-  console.log(`🧠 Smart callback algorithm: Active`);
-  console.log(`💾 Database: ${global.supabase ? 'Connected' : 'Not Connected'}`);
+  console.log(`🚀 Nuviao AI Lead Manager running on port ${PORT}`);
+  console.log(`📅 Google Calendar integration: ${googleTokens ? 'READY' : 'PENDING AUTHORIZATION'}`);
+  console.log(`🤖 Retell AI functions: 15 endpoints ACTIVE`);
+  console.log(`🧠 Smart callback algorithm: ACTIVE`);
+  console.log(`💾 Database: ${global.supabase ? 'CONNECTED' : 'NOT CONNECTED'}`);
+  console.log(`🔐 GHL Private Integration: ${process.env.GHL_API_KEY ? 'CONFIGURED' : 'NOT CONFIGURED'}`);
   
   if (!googleTokens) {
-    console.log(`⚠️ Google Calendar NOT AUTHORIZED - Visit /auth/google to authorize`);
-    console.log(`🔗 Authorization URL: https://nuviao-lead-manager-production.up.railway.app/auth/google`);
-  } else {
-    console.log(`✅ Google Calendar AUTHORIZED and ready!`);
+    console.log(`⚠️  AUTHORIZATION NEEDED: Visit /auth/google to authorize Google Calendar`);
+    console.log(`🔗 Auth URL: https://nuviao-lead-manager-production.up.railway.app/auth/google`);
   }
   
-  // Log environment check
-  console.log(`🔐 Environment Check:`);
-  console.log(`   - RETELL_API_KEY: ${process.env.RETELL_API_KEY ? '✅ Set' : '❌ Missing'}`);
-  console.log(`   - RETELL_AGENT_ID: ${process.env.RETELL_AGENT_ID ? '✅ Set' : '❌ Missing'}`);
-  console.log(`   - GHL_API_KEY: ${process.env.GHL_API_KEY ? '✅ Set' : '❌ Missing'}`);
-  console.log(`   - SUPABASE_URL: ${process.env.SUPABASE_URL ? '✅ Set' : '❌ Missing'}`);
+  // Environment validation
+  console.log(`\n🔐 Environment Validation:`);
+  console.log(`   - RETELL_API_KEY: ${process.env.RETELL_API_KEY ? '✅ SET' : '❌ MISSING'}`);
+  console.log(`   - RETELL_AGENT_ID: ${process.env.RETELL_AGENT_ID ? '✅ SET' : '❌ MISSING'}`);
+  console.log(`   - GHL_API_KEY (PIT): ${process.env.GHL_API_KEY ? '✅ SET (' + process.env.GHL_API_KEY.substring(0, 8) + '...)' : '❌ MISSING'}`);
+  console.log(`   - SUPABASE_URL: ${process.env.SUPABASE_URL ? '✅ SET' : '❌ MISSING'}`);
+  console.log(`   - SUPABASE_ANON_KEY: ${process.env.SUPABASE_ANON_KEY ? '✅ SET' : '❌ MISSING'}`);
+  
+  console.log(`\n🎉 System Status: READY FOR TESTING!`);
+  console.log(`💡 Next: Test with POST to /webhook/ghl-bridge/bestbuyremodel`);
 });
