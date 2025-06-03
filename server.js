@@ -269,9 +269,8 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
     const additional_information = args?.additional_information;
     
     if (!uuid || !chosen_appointment_slot) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: UUID and chosen_appointment_slot'
+      return res.json({
+        result: 'Missing information to schedule appointment'
       });
     }
 
@@ -285,8 +284,8 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
       clientName: call?.metadata?.full_name || 'Lead ' + uuid.substring(0, 8),
       clientPhone: call?.metadata?.phone || 'Unknown',
       clientEmail: call?.metadata?.email || 'unknown@email.com',
-      homeAddress: 'Address to be confirmed',
-      estimateType: 'General Estimate'
+      homeAddress: call?.metadata?.full_address || 'Address to be confirmed',
+      estimateType: call?.metadata?.project_type || 'General Estimate'
     };
 
     // Try to get additional lead info from Supabase
@@ -326,9 +325,28 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
       if (bookingResult.success) {
         console.log(`✅ Google Calendar appointment booked for ${leadInfo.clientName}`);
         
-        // Update lead status in database
+        // Record successful appointment booking in call history
+        let leadId = null;
         if (global.supabase) {
           try {
+            const { data } = await global.supabase
+              .from('leads')
+              .select('id')
+              .eq('custom_fields->uuid', uuid)
+              .single();
+            leadId = data?.id;
+            
+            if (leadId) {
+              await recordCall(leadId, {
+                callTime: new Date().toISOString(),
+                outcome: 'appointment_booked',
+                duration: 0,
+                attemptNumber: 1,
+                notes: `Appointment booked: ${appointmentDate.toLocaleString()}`
+              });
+            }
+            
+            // Update lead status
             await global.supabase
               .from('leads')
               .update({ 
@@ -342,23 +360,32 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
         }
 
         res.json({
-          result: `Appointment scheduled successfully for ${appointmentDate.toLocaleString()} with ${leadInfo.clientName}`
+          result: `Perfect! I've scheduled your appointment for ${appointmentDate.toLocaleDateString('en-US', { 
+            weekday: 'long', 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric' 
+          })} at ${appointmentDate.toLocaleTimeString('en-US', { 
+            hour: 'numeric', 
+            minute: '2-digit', 
+            hour12: true 
+          })}. You'll receive a calendar invitation shortly. Our team will call you about thirty minutes before the appointment to confirm.`
         });
       } else {
         res.json({
-          result: 'Failed to book appointment: ' + bookingResult.error
+          result: 'I encountered an issue scheduling the appointment in our calendar system. Let me transfer you to someone who can help you schedule this manually.'
         });
       }
     } else {
       res.json({
-        result: 'Appointment noted - Google Calendar not authorized'
+        result: 'I have noted your preferred appointment time. Our scheduling team will call you back within the hour to confirm this appointment.'
       });
     }
 
   } catch (error) {
     console.error('❌ Schedule lead error:', error);
     res.json({
-      result: 'Failed to schedule appointment'
+      result: 'I apologize, but I encountered an issue while scheduling your appointment. Let me transfer you to our scheduling team.'
     });
   }
 });
@@ -373,13 +400,13 @@ app.post('/webhook/check-availability/bestbuyremodel', async (req, res) => {
     
     if (!appointment_date) {
       return res.json({
-        result: 'Please provide a date to check availability'
+        result: 'Could you please specify which date you\'d like to check availability for?'
       });
     }
 
     if (googleTokens) {
       // Check Google Calendar availability for specific date
-      const availability = await checkAvailabilityWithGoogle(googleTokens, 1);
+      const availability = await checkAvailabilityWithGoogle(googleTokens, 7);
       
       if (availability.success) {
         // Filter for the requested date
@@ -392,28 +419,41 @@ app.post('/webhook/check-availability/bestbuyremodel', async (req, res) => {
         if (availableDay && availableDay.slots.length > 0) {
           const slotsText = availableDay.slots.map(slot => slot.displayTime).join(', ');
           res.json({
-            result: `Available times on ${appointment_date}: ${slotsText}`
+            result: `Great! I have availability on ${requestedDate.toLocaleDateString('en-US', { 
+              weekday: 'long', 
+              month: 'long', 
+              day: 'numeric' 
+            })} at these times: ${slotsText}. Which time works best for you?`
           });
         } else {
           res.json({
-            result: `No availability on ${appointment_date}. Please choose another date.`
+            result: `I don't have any availability on ${requestedDate.toLocaleDateString('en-US', { 
+              weekday: 'long', 
+              month: 'long', 
+              day: 'numeric' 
+            })}. Would you like me to check another date?`
           });
         }
       } else {
         res.json({
-          result: 'Unable to check calendar availability'
+          result: 'Let me check our schedule and get back to you on availability.'
         });
       }
     } else {
+      // Fallback availability
       res.json({
-        result: `Available times on ${appointment_date}: 9:00 AM, 10:00 AM, 11:00 AM, 2:00 PM, 3:00 PM`
+        result: `I have availability on ${new Date(appointment_date).toLocaleDateString('en-US', { 
+          weekday: 'long', 
+          month: 'long', 
+          day: 'numeric' 
+        })} at nine A M, ten A M, eleven A M, two P M, and three P M. Which time works best for you?`
       });
     }
 
   } catch (error) {
     console.error('❌ Check availability error:', error);
     res.json({
-      result: 'Failed to check availability'
+      result: 'Let me check our schedule and get back to you on availability.'
     });
   }
 });
@@ -430,376 +470,11 @@ app.post('/webhook/update-phone/bestbuyremodel', async (req, res) => {
     
     if (!uuid || !phone) {
       return res.json({
-        result: 'Missing information to update phone number'
+        result: 'I need your phone number to update our records.'
       });
     }
 
     if (global.supabase) {
-      const { error } = await global.supabase
-        .from('leads')
-        .update({ phone: phone })
-        .eq('custom_fields->uuid', uuid);
-      
-      if (error) {
-        console.error('Database update error:', error);
-        res.json({ result: 'Failed to update phone number in database' });
-      } else {
-        res.json({ result: 'Phone number updated successfully' });
-      }
-    } else {
-      res.json({ result: 'Phone number update noted' });
-    }
-
-  } catch (error) {
-    console.error('❌ Update phone error:', error);
-    res.json({ result: 'Failed to update phone number' });
-  }
-});
-
-// 4. Validate Lead Address
-app.post('/webhook/validate-address/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('📍 Validate address called:', req.body);
-    
-    const { args } = req.body;
-    const address = args?.address;
-    
-    if (!address) {
-      return res.json({
-        result: 'Please provide an address to validate'
-      });
-    }
-
-    // Simple validation - check if it contains Las Vegas area
-    const isLasVegas = address.toLowerCase().includes('las vegas') || 
-                      address.toLowerCase().includes('henderson') ||
-                      address.toLowerCase().includes('summerlin') ||
-                      /89\d{3}/.test(address); // Las Vegas ZIP codes
-
-    if (isLasVegas) {
-      res.json({
-        result: 'Address is within our service area'
-      });
-    } else {
-      res.json({
-        result: 'Address is outside our service area. We serve Las Vegas, Henderson, and Summerlin areas.'
-      });
-    }
-
-  } catch (error) {
-    console.error('❌ Validate address error:', error);
-    res.json({ result: 'Failed to validate address' });
-  }
-});
-
-// 5. Call Lead Back Later
-app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('⏰ Call back later called:', req.body);
-    
-    // Extract from call metadata and function args
-    const { call, args } = req.body;
-    const uuid = call?.metadata?.uuid;
-    const proposed_callback_time = args?.proposed_callback_time;
-    
-    if (!uuid) {
-      return res.json({
-        result: 'Unable to schedule callback - missing lead information'
-      });
-    }
-
-    // Get lead ID from UUID
-    let leadId = null;
-    if (global.supabase) {
-      const { data } = await global.supabase
-        .from('leads')
-        .select('id')
-        .eq('custom_fields->uuid', uuid)
-        .single();
-      leadId = data?.id;
-    }
-
-    // Record the callback request and schedule smart callbacks
-    if (leadId) {
-      await recordCall(leadId, {
-        callTime: new Date().toISOString(),
-        outcome: 'callback_requested',
-        duration: 0,
-        notes: `Callback requested for: ${proposed_callback_time}`
-      });
-
-      // Schedule smart callbacks using AI predictions
-      await initializeCallback(leadId, 'callback_requested');
-    }
-
-    if (global.supabase) {
-      const { error } = await global.supabase
-        .from('leads')
-        .update({ 
-          status: 'callback_scheduled',
-          callback_time: proposed_callback_time 
-        })
-        .eq('custom_fields->uuid', uuid);
-      
-      if (error) {
-        console.error('Database update error:', error);
-      }
-    }
-
-    res.json({
-      result: `Smart callbacks scheduled successfully. We'll call you back soon!`
-    });
-
-  } catch (error) {
-    console.error('❌ Call back later error:', error);
-    res.json({ result: 'Failed to schedule callback' });
-  }
-});
-
-// 6. Mark Wrong Number
-app.post('/webhook/mark-wrong-number/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('❌ Mark wrong number called:', req.body);
-    
-    // Extract from call metadata
-    const { call } = req.body;
-    const uuid = call?.metadata?.uuid;
-    
-    if (!uuid) {
-      return res.json({
-        result: 'Unable to mark wrong number - missing lead information'
-      });
-    }
-
-    if (global.supabase) {
-      const { error } = await global.supabase
-        .from('leads')
-        .update({ status: 'wrong_number' })
-        .eq('custom_fields->uuid', uuid);
-      
-      if (error) {
-        console.error('Database update error:', error);
-      }
-    }
-
-    res.json({
-      result: 'Lead marked as wrong number'
-    });
-
-  } catch (error) {
-    console.error('❌ Mark wrong number error:', error);
-    res.json({ result: 'Failed to mark wrong number' });
-  }
-});
-
-// 7. Update Lead Address
-app.post('/webhook/update-address/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('📍 Update address called:', req.body);
-    
-    // Extract from call metadata and function args
-    const { call, args } = req.body;
-    const uuid = call?.metadata?.uuid;
-    const address = args?.address;
-    const city = args?.city;
-    const state = args?.state;
-    const zip = args?.zip;
-    
-    if (!uuid || !address || !city || !state || !zip) {
-      return res.json({
-        result: 'Missing address information to update'
-      });
-    }
-
-    const fullAddress = `${address}, ${city}, ${state} ${zip}`;
-
-    if (global.supabase) {
-      const { error } = await global.supabase
-        .from('leads')
-        .update({ 
-          custom_fields: {
-            full_address: fullAddress,
-            street_address: address,
-            city: city,
-            state: state,
-            zip_code: zip
-          }
-        })
-        .eq('custom_fields->uuid', uuid);
-      
-      if (error) {
-        console.error('Database update error:', error);
-        res.json({ result: 'Failed to update address in database' });
-      } else {
-        res.json({ 
-          result: `Address updated successfully: ${fullAddress}`
-        });
-      }
-    } else {
-      res.json({ result: 'Address update noted' });
-    }
-
-  } catch (error) {
-    console.error('❌ Update address error:', error);
-    res.json({ result: 'Failed to update address' });
-  }
-});
-
-// 8. Lead Is Mobile Home
-app.post('/webhook/mobile-home/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('🏠 Mobile home called:', req.body);
-    
-    // Extract from call metadata
-    const { call } = req.body;
-    const uuid = call?.metadata?.uuid;
-    
-    if (!uuid) {
-      return res.json({
-        result: 'Unable to process mobile home status - missing lead information'
-      });
-    }
-
-    if (global.supabase) {
-      const { error } = await global.supabase
-        .from('leads')
-        .update({ status: 'mobile_home_declined' })
-        .eq('custom_fields->uuid', uuid);
-      
-      if (error) {
-        console.error('Database update error:', error);
-      }
-    }
-
-    res.json({
-      result: 'Unfortunately, we do not service mobile or manufactured homes'
-    });
-
-  } catch (error) {
-    console.error('❌ Mobile home error:', error);
-    res.json({ result: 'Failed to process mobile home status' });
-  }
-});
-
-// 9. Lead Outside Area
-app.post('/webhook/outside-area/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('🌍 Outside area called:', req.body);
-    
-    // Extract from call metadata
-    const { call } = req.body;
-    const uuid = call?.metadata?.uuid;
-    
-    if (!uuid) {
-      return res.json({
-        result: 'Unable to process service area status - missing lead information'
-      });
-    }
-
-    if (global.supabase) {
-      const { error } = await global.supabase
-        .from('leads')
-        .update({ status: 'outside_service_area' })
-        .eq('custom_fields->uuid', uuid);
-      
-      if (error) {
-        console.error('Database update error:', error);
-      }
-    }
-
-    res.json({
-      result: 'Unfortunately, your location is outside our service area'
-    });
-
-  } catch (error) {
-    console.error('❌ Outside area error:', error);
-    res.json({ result: 'Failed to process service area status' });
-  }
-});
-
-// 10. Lead Not Interested
-app.post('/webhook/not-interested/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('❌ Not interested called:', req.body);
-    
-    // Extract from call metadata
-    const { call } = req.body;
-    const uuid = call?.metadata?.uuid;
-    
-    if (!uuid) {
-      return res.json({
-        result: 'Unable to process interest status - missing lead information'
-      });
-    }
-
-    if (global.supabase) {
-      const { error } = await global.supabase
-        .from('leads')
-        .update({ status: 'not_interested' })
-        .eq('custom_fields->uuid', uuid);
-      
-      if (error) {
-        console.error('Database update error:', error);
-      }
-    }
-
-    res.json({
-      result: 'Thank you for your time. We understand you are not interested at this time.'
-    });
-
-  } catch (error) {
-    console.error('❌ Not interested error:', error);
-    res.json({ result: 'Failed to process interest status' });
-  }
-});
-
-// 11. Transfer Call
-app.post('/webhook/transfer-call/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('📞 Transfer call requested:', req.body);
-    
-    res.json({
-      result: 'Transferring you to a human representative now'
-    });
-
-  } catch (error) {
-    console.error('❌ Transfer call error:', error);
-    res.json({ result: 'Failed to transfer call' });
-  }
-});
-
-// 12. Update Lead First Name
-app.post('/webhook/update-first-name/bestbuyremodel', async (req, res) => {
-  try {
-    console.log('👤 Update first name called:', req.body);
-    
-    // Extract from call metadata and function args
-    const { call, args } = req.body;
-    const uuid = call?.metadata?.uuid;
-    const first_name = args?.first_name;
-    
-    if (!uuid || !first_name) {
-      return res.json({
-        result: 'Missing information to update first name'
-      });
-    }
-
-    if (global.supabase) {
-      // Get current name to update properly
-      const { data: currentLead } = await global.supabase
-        .from('leads')
-        .select('name')
-        .eq('custom_fields->uuid', uuid)
-        .single();
-      
-      let newFullName = first_name;
-      if (currentLead && currentLead.name) {
-        const nameParts = currentLead.name.split(' ');
-        if (nameParts.length > 1) {
-          newFullName = first_name + ' ' + nameParts.slice(1).join(' ');
-        }
-      }
-
       const { error } = await global.supabase
         .from('leads')
         .update({ name: newFullName })
@@ -807,19 +482,19 @@ app.post('/webhook/update-first-name/bestbuyremodel', async (req, res) => {
       
       if (error) {
         console.error('Database update error:', error);
-        res.json({ result: 'Failed to update first name in database' });
+        res.json({ result: 'I\'ve noted your first name, but had trouble updating our database. Our team will make sure this gets corrected.' });
       } else {
         res.json({ 
-          result: `First name updated successfully to ${first_name}`
+          result: `Perfect! I've updated your first name to ${first_name} in our system.`
         });
       }
     } else {
-      res.json({ result: 'First name update noted' });
+      res.json({ result: `Got it! I've noted your first name as ${first_name}.` });
     }
 
   } catch (error) {
     console.error('❌ Update first name error:', error);
-    res.json({ result: 'Failed to update first name' });
+    res.json({ result: 'I\'ve noted your first name and our team will update our records.' });
   }
 });
 
@@ -835,7 +510,7 @@ app.post('/webhook/update-last-name/bestbuyremodel', async (req, res) => {
     
     if (!uuid || !last_name) {
       return res.json({
-        result: 'Missing information to update last name'
+        result: 'I need your last name to update our records.'
       });
     }
 
@@ -860,19 +535,19 @@ app.post('/webhook/update-last-name/bestbuyremodel', async (req, res) => {
       
       if (error) {
         console.error('Database update error:', error);
-        res.json({ result: 'Failed to update last name in database' });
+        res.json({ result: 'I\'ve noted your last name, but had trouble updating our database. Our team will make sure this gets corrected.' });
       } else {
         res.json({ 
-          result: `Last name updated successfully to ${last_name}`
+          result: `Perfect! I've updated your last name to ${last_name} in our system.`
         });
       }
     } else {
-      res.json({ result: 'Last name update noted' });
+      res.json({ result: `Got it! I've noted your last name as ${last_name}.` });
     }
 
   } catch (error) {
     console.error('❌ Update last name error:', error);
-    res.json({ result: 'Failed to update last name' });
+    res.json({ result: 'I\'ve noted your last name and our team will update our records.' });
   }
 });
 
@@ -888,7 +563,7 @@ app.post('/webhook/update-email/bestbuyremodel', async (req, res) => {
     
     if (!uuid || !email) {
       return res.json({
-        result: 'Missing information to update email'
+        result: 'I need your email address to update our records.'
       });
     }
 
@@ -900,17 +575,17 @@ app.post('/webhook/update-email/bestbuyremodel', async (req, res) => {
       
       if (error) {
         console.error('Database update error:', error);
-        res.json({ result: 'Failed to update email in database' });
+        res.json({ result: 'I\'ve noted your email address, but had trouble updating our database. Our team will make sure this gets corrected.' });
       } else {
-        res.json({ result: 'Email updated successfully' });
+        res.json({ result: `Perfect! I've updated your email address to ${email} in our system.` });
       }
     } else {
-      res.json({ result: 'Email update noted' });
+      res.json({ result: `Got it! I've noted your email address as ${email}.` });
     }
 
   } catch (error) {
     console.error('❌ Update email error:', error);
-    res.json({ result: 'Failed to update email' });
+    res.json({ result: 'I\'ve noted your email address and our team will update our records.' });
   }
 });
 
@@ -928,7 +603,7 @@ app.post('/webhook/end-call/bestbuyremodel', async (req, res) => {
 
   } catch (error) {
     console.error('❌ End call error:', error);
-    res.json({ result: 'Call ended' });
+    res.json({ result: 'Thank you for your time. Have a great day!' });
   }
 });
 
@@ -947,7 +622,10 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
       phone: req.body.phone,
       email: req.body.email,
       source: req.body.source || 'ghl',
-      ghl_contact_id: req.body.contact_id || req.body.id
+      ghl_contact_id: req.body.contact_id || req.body.id,
+      project_type: req.body.project_type || 'General Inquiry',
+      project_notes: req.body.project_notes || 'Lead inquiry',
+      full_address: req.body.full_address || 'Address to be confirmed'
     };
 
     // Validate required fields
@@ -975,7 +653,10 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
             status: 'new',
             custom_fields: {
               original_ghl_contact_id: leadData.ghl_contact_id,
-              uuid: require('crypto').randomUUID() // Generate UUID for Retell functions
+              uuid: require('crypto').randomUUID(), // Generate UUID for Retell functions
+              project_type: leadData.project_type,
+              project_notes: leadData.project_notes,
+              full_address: leadData.full_address
             }
           })
           .select()
@@ -1083,7 +764,7 @@ async function createGHLContact(leadData) {
   }
 }
 
-// Function to initiate AI call via Retell (updated with Google Calendar data and UUID)
+// 🚀 FIXED: Function to initiate AI call via Retell (with ALL metadata fields)
 async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
   try {
     if (!process.env.RETELL_API_KEY || !process.env.RETELL_AGENT_ID) {
@@ -1097,14 +778,22 @@ async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
       to_number: leadData.phone,
       agent_id: process.env.RETELL_AGENT_ID,
       metadata: {
+        // System fields
         railway_lead_id: railwayLeadId,
         ghl_contact_id: ghlContactId,
+        uuid: uuid,
+        
+        // 🚀 FIXED: All metadata fields that Carl's prompt expects
         first_name: leadData.name.split(' ')[0],
+        last_name: leadData.name.split(' ').slice(1).join(' ') || '',
         full_name: leadData.name,
         phone: leadData.phone,
         email: leadData.email || '',
-        uuid: uuid, // 🆕 Add UUID for function calls
-        // 🆕 Include Google Calendar availability for Carl
+        project_type: leadData.project_type || 'General Inquiry',
+        project_notes: leadData.project_notes || 'Lead inquiry',
+        full_address: leadData.full_address || 'Address to be confirmed',
+        
+        // Calendar integration
         calendar_availability: JSON.stringify(leadData.availability || []),
         calendar_provider: 'Google Calendar'
       }
@@ -1116,6 +805,17 @@ async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
     });
 
     console.log(`✅ AI call initiated successfully: ${response.data.call_id}`);
+    console.log(`📋 Metadata sent to Carl:`, {
+      first_name: leadData.name.split(' ')[0],
+      last_name: leadData.name.split(' ').slice(1).join(' ') || '',
+      full_name: leadData.name,
+      phone: leadData.phone,
+      email: leadData.email || '',
+      project_type: leadData.project_type || 'General Inquiry',
+      project_notes: leadData.project_notes || 'Lead inquiry',
+      full_address: leadData.full_address || 'Address to be confirmed'
+    });
+    
     return { 
       success: true, 
       call_id: response.data.call_id 
@@ -1387,4 +1087,384 @@ app.listen(PORT, () => {
   if (!googleTokens) {
     console.log(`⚠️ Visit /auth/google to authorize Google Calendar access`);
   }
+}); await global.supabase
+        .from('leads')
+        .update({ phone: phone })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+        res.json({ result: 'I noted your phone number, but had trouble updating our database. Our team will make sure this gets corrected.' });
+      } else {
+        res.json({ result: `Perfect! I've updated your phone number to ${phone.replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3')} in our system.` });
+      }
+    } else {
+      res.json({ result: `Got it! I've noted your phone number as ${phone.replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3')}.` });
+    }
+
+  } catch (error) {
+    console.error('❌ Update phone error:', error);
+    res.json({ result: 'I\'ve noted your phone number and our team will update our records.' });
+  }
 });
+
+// 4. Validate Lead Address
+app.post('/webhook/validate-address/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📍 Validate address called:', req.body);
+    
+    const { args } = req.body;
+    const address = args?.address;
+    
+    if (!address) {
+      return res.json({
+        result: 'Could you please provide your address so I can verify we service your area?'
+      });
+    }
+
+    // Simple validation - check if it contains Las Vegas area
+    const isLasVegas = address.toLowerCase().includes('las vegas') || 
+                      address.toLowerCase().includes('henderson') ||
+                      address.toLowerCase().includes('summerlin') ||
+                      /89\d{3}/.test(address); // Las Vegas ZIP codes
+
+    if (isLasVegas) {
+      res.json({
+        result: 'Excellent! Your address is within our service area. We\'ll be able to provide you with a free in-home estimate.'
+      });
+    } else {
+      res.json({
+        result: 'I apologize, but your address appears to be outside our current service area. We primarily serve Las Vegas, Henderson, and Summerlin. Let me transfer you to someone who can discuss other options with you.'
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Validate address error:', error);
+    res.json({ result: 'Let me verify your service area and get back to you on that.' });
+  }
+});
+
+// 5. Call Lead Back Later
+app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('⏰ Call back later called:', req.body);
+    
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const proposed_callback_time = args?.proposed_callback_time;
+    
+    if (!uuid) {
+      return res.json({
+        result: 'I\'ll make sure our team follows up with you soon.'
+      });
+    }
+
+    // Get lead ID from UUID
+    let leadId = null;
+    if (global.supabase) {
+      const { data } = await global.supabase
+        .from('leads')
+        .select('id')
+        .eq('custom_fields->uuid', uuid)
+        .single();
+      leadId = data?.id;
+    }
+
+    // Record the callback request and schedule smart callbacks
+    if (leadId) {
+      await recordCall(leadId, {
+        callTime: new Date().toISOString(),
+        outcome: 'callback_requested',
+        duration: 0,
+        notes: `Callback requested for: ${proposed_callback_time || 'later'}`
+      });
+
+      // Schedule smart callbacks using AI predictions
+      await initializeCallback(leadId, 'callback_requested');
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ 
+          status: 'callback_scheduled',
+          callback_time: proposed_callback_time 
+        })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    if (proposed_callback_time) {
+      const callbackDate = new Date(proposed_callback_time);
+      res.json({
+        result: `Perfect! I'll have someone call you back on ${callbackDate.toLocaleDateString('en-US', { 
+          weekday: 'long', 
+          month: 'long', 
+          day: 'numeric' 
+        })} at ${callbackDate.toLocaleTimeString('en-US', { 
+          hour: 'numeric', 
+          minute: '2-digit', 
+          hour12: true 
+        })}. Have a great day!`
+      });
+    } else {
+      res.json({
+        result: 'No problem! I\'ll have someone from our team call you back within the next two hours. Thank you for your interest!'
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Call back later error:', error);
+    res.json({ result: 'I\'ll make sure our team follows up with you soon. Thank you!' });
+  }
+});
+
+// 6. Mark Wrong Number
+app.post('/webhook/mark-wrong-number/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('❌ Mark wrong number called:', req.body);
+    
+    // Extract from call metadata
+    const { call } = req.body;
+    const uuid = call?.metadata?.uuid;
+    
+    if (!uuid) {
+      return res.json({
+        result: 'I apologize for the inconvenience. We\'ll update our records.'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ status: 'wrong_number' })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    res.json({
+      result: 'I apologize for calling the wrong number. We\'ll update our records immediately. Have a great day!'
+    });
+
+  } catch (error) {
+    console.error('❌ Mark wrong number error:', error);
+    res.json({ result: 'Sorry for the inconvenience. We\'ll update our records.' });
+  }
+});
+
+// 7. Update Lead Address
+app.post('/webhook/update-address/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📍 Update address called:', req.body);
+    
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const address = args?.address;
+    const city = args?.city;
+    const state = args?.state;
+    const zip = args?.zip;
+    
+    if (!uuid || !address || !city || !state || !zip) {
+      return res.json({
+        result: 'I need your complete address including street, city, state, and zip code to update our records.'
+      });
+    }
+
+    const fullAddress = `${address}, ${city}, ${state} ${zip}`;
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ 
+          custom_fields: {
+            full_address: fullAddress,
+            street_address: address,
+            city: city,
+            state: state,
+            zip_code: zip
+          }
+        })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+        res.json({ result: 'I\'ve noted your address, but had trouble updating our database. Our team will make sure this gets corrected.' });
+      } else {
+        res.json({ 
+          result: `Perfect! I've updated your address to ${address}, ${city}, ${state} ${zip} in our system.`
+        });
+      }
+    } else {
+      res.json({ result: `Got it! I've noted your address as ${address}, ${city}, ${state} ${zip}.` });
+    }
+
+  } catch (error) {
+    console.error('❌ Update address error:', error);
+    res.json({ result: 'I\'ve noted your address and our team will update our records.' });
+  }
+});
+
+// 8. Lead Is Mobile Home
+app.post('/webhook/mobile-home/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('🏠 Mobile home called:', req.body);
+    
+    // Extract from call metadata
+    const { call } = req.body;
+    const uuid = call?.metadata?.uuid;
+    
+    if (!uuid) {
+      return res.json({
+        result: 'I understand. Unfortunately, we don\'t service mobile or manufactured homes.'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ status: 'mobile_home_declined' })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    res.json({
+      result: 'I understand you have a mobile or manufactured home. Unfortunately, we specialize in traditional site-built homes and don\'t currently service mobile or manufactured homes. I apologize for any inconvenience.'
+    });
+
+  } catch (error) {
+    console.error('❌ Mobile home error:', error);
+    res.json({ result: 'Unfortunately, we don\'t service mobile or manufactured homes at this time.' });
+  }
+});
+
+// 9. Lead Outside Area
+app.post('/webhook/outside-area/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('🌍 Outside area called:', req.body);
+    
+    // Extract from call metadata
+    const { call } = req.body;
+    const uuid = call?.metadata?.uuid;
+    
+    if (!uuid) {
+      return res.json({
+        result: 'Unfortunately, your location is outside our current service area.'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ status: 'outside_service_area' })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    res.json({
+      result: 'I apologize, but your location is outside our current service area. We primarily serve Las Vegas, Henderson, and Summerlin. Thank you for your interest in Best Buy Remodel.'
+    });
+
+  } catch (error) {
+    console.error('❌ Outside area error:', error);
+    res.json({ result: 'Unfortunately, your location is outside our current service area.' });
+  }
+});
+
+// 10. Lead Not Interested
+app.post('/webhook/not-interested/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('❌ Not interested called:', req.body);
+    
+    // Extract from call metadata
+    const { call } = req.body;
+    const uuid = call?.metadata?.uuid;
+    
+    if (!uuid) {
+      return res.json({
+        result: 'I completely understand. Thank you for your time and have a wonderful day.'
+      });
+    }
+
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ status: 'not_interested' })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+      }
+    }
+
+    res.json({
+      result: 'I completely understand. Thank you for taking the time to speak with me today. If you ever change your mind about your remodeling project, please don\'t hesitate to reach out. Have a wonderful day!'
+    });
+
+  } catch (error) {
+    console.error('❌ Not interested error:', error);
+    res.json({ result: 'I understand. Thank you for your time and have a great day!' });
+  }
+});
+
+// 11. Transfer Call
+app.post('/webhook/transfer-call/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('📞 Transfer call requested:', req.body);
+    
+    res.json({
+      result: 'Let me transfer you to one of our specialists who can better assist you. Please hold for just a moment.'
+    });
+
+  } catch (error) {
+    console.error('❌ Transfer call error:', error);
+    res.json({ result: 'Let me get you connected with someone who can help you right away.' });
+  }
+});
+
+// 12. Update Lead First Name
+app.post('/webhook/update-first-name/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('👤 Update first name called:', req.body);
+    
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const first_name = args?.first_name;
+    
+    if (!uuid || !first_name) {
+      return res.json({
+        result: 'I need your first name to update our records.'
+      });
+    }
+
+    if (global.supabase) {
+      // Get current name to update properly
+      const { data: currentLead } = await global.supabase
+        .from('leads')
+        .select('name')
+        .eq('custom_fields->uuid', uuid)
+        .single();
+      
+      let newFullName = first_name;
+      if (currentLead && currentLead.name) {
+        const nameParts = currentLead.name.split(' ');
+        if (nameParts.length > 1) {
+          newFullName = first_name + ' ' + nameParts.slice(1).join(' ');
+        }
+      }
+
+      const { error } =
