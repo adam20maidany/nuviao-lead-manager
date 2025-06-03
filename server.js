@@ -63,13 +63,91 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
     const { call, args } = req.body;
     const uuid = call?.metadata?.uuid;
     const chosen_appointment_slot = args?.chosen_appointment_slot;
+    const additional_information = args?.additional_information;
     
     if (!uuid || !chosen_appointment_slot) {
       return res.json({ result: 'Missing information to schedule appointment' });
     }
 
-    res.json({ result: 'Appointment scheduling noted. Our team will follow up to confirm.' });
+    const appointmentDate = new Date(chosen_appointment_slot.replace(' ', 'T') + ':00.000Z');
+    const endDate = new Date(appointmentDate);
+    endDate.setHours(endDate.getHours() + 1);
+
+    let leadInfo = {
+      clientName: call?.metadata?.full_name || 'Lead',
+      clientPhone: call?.metadata?.phone || 'Unknown',
+      clientEmail: call?.metadata?.email || 'unknown@email.com',
+      homeAddress: call?.metadata?.full_address || 'Address to be confirmed',
+      estimateType: call?.metadata?.project_type || 'General Estimate'
+    };
+
+    const appointmentData = {
+      ...leadInfo,
+      callSummary: additional_information || 'Scheduled via AI call',
+      startTime: appointmentDate.toISOString(),
+      endTime: endDate.toISOString()
+    };
+
+    if (googleTokens) {
+      const bookingResult = await bookAppointmentWithGoogle(googleTokens, appointmentData);
+      
+      if (bookingResult.success) {
+        console.log(`✅ Google Calendar appointment booked for ${leadInfo.clientName}`);
+        
+        // Record successful appointment booking
+        let leadId = null;
+        if (global.supabase) {
+          try {
+            const { data } = await global.supabase
+              .from('leads')
+              .select('id')
+              .eq('custom_fields->uuid', uuid)
+              .single();
+            leadId = data?.id;
+            
+            if (leadId) {
+              await recordCall(leadId, {
+                callTime: new Date().toISOString(),
+                outcome: 'appointment_booked',
+                duration: 0,
+                attemptNumber: 1,
+                notes: `Appointment booked: ${appointmentDate.toLocaleString()}`
+              });
+            }
+            
+            // Update lead status
+            await global.supabase
+              .from('leads')
+              .update({ 
+                status: 'appointment_booked',
+                appointment_time: appointmentDate.toISOString()
+              })
+              .eq('custom_fields->uuid', uuid);
+          } catch (dbError) {
+            console.error('Failed to update lead status:', dbError);
+          }
+        }
+
+        res.json({
+          result: `Perfect! I have scheduled your appointment for ${appointmentDate.toLocaleDateString('en-US', { 
+            weekday: 'long', 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric' 
+          })} at ${appointmentDate.toLocaleTimeString('en-US', { 
+            hour: 'numeric', 
+            minute: '2-digit', 
+            hour12: true 
+          })}. You will receive a calendar invitation shortly.`
+        });
+      } else {
+        res.json({ result: 'I encountered an issue scheduling the appointment. Let me transfer you to someone who can help.' });
+      }
+    } else {
+      res.json({ result: 'Appointment scheduling noted. Our team will follow up to confirm.' });
+    }
   } catch (error) {
+    console.error('❌ Schedule lead error:', error);
     res.json({ result: 'I apologize, but I encountered an issue while scheduling.' });
   }
 });
@@ -130,8 +208,38 @@ app.post('/webhook/validate-address/bestbuyremodel', async (req, res) => {
 
 app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
   try {
-    res.json({ result: 'No problem! I will have someone from our team call you back soon.' });
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const proposed_callback_time = args?.proposed_callback_time;
+    
+    // Get lead ID for smart callback scheduling
+    let leadId = null;
+    if (global.supabase && uuid) {
+      const { data } = await global.supabase
+        .from('leads')
+        .select('id')
+        .eq('custom_fields->uuid', uuid)
+        .single();
+      leadId = data?.id;
+    }
+
+    // Record the callback request and schedule smart callbacks
+    if (leadId) {
+      await recordCall(leadId, {
+        callTime: new Date().toISOString(),
+        outcome: 'callback_requested',
+        duration: 0,
+        notes: `Callback requested for: ${proposed_callback_time || 'later'}`
+      });
+
+      // Schedule smart callbacks using AI predictions
+      await initializeCallback(leadId, 'callback_requested');
+      console.log(`🧠 Smart callbacks scheduled for lead ${leadId}`);
+    }
+
+    res.json({ result: 'No problem! I will have someone from our team call you back soon. Our AI system will optimize the best times to reach you.' });
   } catch (error) {
+    console.error('❌ Call back later error:', error);
     res.json({ result: 'I will make sure our team follows up with you.' });
   }
 });
@@ -389,6 +497,78 @@ async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
   }
 }
 
+// Smart Callback Endpoints
+app.get('/webhook/optimal-call-times/:leadId', async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const daysAhead = parseInt(req.query.days) || 3;
+    
+    console.log(`🧠 Getting optimal call times for lead ${leadId}`);
+    
+    const predictor = new SmartCallbackPredictor();
+    const predictions = await predictor.predictOptimalCallTimes(leadId, daysAhead);
+    
+    res.json({
+      success: true,
+      lead_id: leadId,
+      predictions: predictions,
+      total_days: predictions.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Optimal call times error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get optimal call times' });
+  }
+});
+
+app.post('/webhook/schedule-smart-callbacks/bestbuyremodel', async (req, res) => {
+  try {
+    const { leadId, initialOutcome, maxCallbacksPerDay } = req.body;
+    
+    if (!leadId) {
+      return res.status(400).json({ success: false, error: 'Missing required field: leadId' });
+    }
+    
+    console.log(`🧠 Scheduling smart callbacks for lead ${leadId}, outcome: ${initialOutcome}`);
+    
+    const result = await initializeCallback(leadId, initialOutcome || 'no_answer');
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('❌ Schedule smart callbacks error:', error);
+    res.status(500).json({ success: false, error: 'Failed to schedule smart callbacks' });
+  }
+});
+
+app.get('/webhook/callback-queue', async (req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const futureTime = new Date();
+    futureTime.setMinutes(futureTime.getMinutes() + 30);
+    
+    const { data, error } = await global.supabase
+      .from('callback_queue')
+      .select(`*, leads (id, name, phone, email, custom_fields)`)
+      .eq('status', 'scheduled')
+      .gte('scheduled_time', now)
+      .lte('scheduled_time', futureTime.toISOString())
+      .order('predicted_score', { ascending: false });
+    
+    if (error) throw error;
+    
+    res.json({
+      success: true,
+      pending_callbacks: data || [],
+      count: data?.length || 0
+    });
+    
+  } catch (error) {
+    console.error('❌ Get callback queue error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get callback queue' });
+  }
+});
+
 // Test endpoints
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
@@ -407,4 +587,11 @@ app.listen(PORT, () => {
   console.log(`🚀 Nuviao Bridge running on port ${PORT}`);
   console.log(`📅 Google Calendar integration enabled!`);
   console.log(`🤖 Retell AI functions: 15 endpoints active`);
+  
+  if (!googleTokens) {
+    console.log(`⚠️ Google Calendar NOT AUTHORIZED - Visit /auth/google to authorize`);
+    console.log(`🔗 Authorization URL: https://nuviao-lead-manager-production.up.railway.app/auth/google`);
+  } else {
+    console.log(`✅ Google Calendar AUTHORIZED and ready!`);
+  }
 });
