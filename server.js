@@ -149,6 +149,22 @@ async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
 // DEBUG AND TEST ENDPOINTS
 // ========================================
 
+// Add this debug endpoint BEFORE your other webhooks
+app.post('/debug/retell-metadata-test', async (req, res) => {
+  console.log('🔍 RETELL METADATA DEBUG:');
+  console.log('Full request body:', JSON.stringify(req.body, null, 2));
+  console.log('Call object:', req.body.call);
+  console.log('Call metadata:', req.body.call?.metadata);
+  console.log('Available metadata fields:', Object.keys(req.body.call?.metadata || {}));
+  
+  res.json({
+    success: true,
+    received_metadata: req.body.call?.metadata || {},
+    metadata_count: Object.keys(req.body.call?.metadata || {}).length,
+    test_result: 'Check Railway logs for full metadata details'
+  });
+});
+
 // Test PIT token functionality
 app.get('/debug/test-pit-token', async (req, res) => {
   try {
