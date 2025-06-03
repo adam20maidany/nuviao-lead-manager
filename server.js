@@ -843,25 +843,42 @@ async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
 
     console.log(`📞 Calling Retell AI for ${leadData.name} at ${leadData.phone}`);
     
+    const metadata = {
+      // System fields
+      railway_lead_id: railwayLeadId,
+      ghl_contact_id: ghlContactId,
+      uuid: uuid,
+      
+      // EXACT fields that Carl's prompt expects
+      first_name: leadData.name.split(' ')[0],
+      last_name: leadData.name.split(' ').slice(1).join(' ') || '',
+      full_address: leadData.full_address || 'Address to be confirmed',
+      project_notes: leadData.project_notes || 'Lead inquiry',
+      phone: leadData.phone,
+      project_type: leadData.project_type || 'General Inquiry', 
+      email: leadData.email || '',
+      
+      // Additional fields
+      full_name: leadData.name,
+      calendar_availability: JSON.stringify(leadData.availability || []),
+      calendar_provider: 'Google Calendar'
+    };
+    
+    console.log('🚀 METADATA BEING SENT TO CARL:');
+    console.log('first_name:', metadata.first_name);
+    console.log('last_name:', metadata.last_name);
+    console.log('full_address:', metadata.full_address);
+    console.log('project_notes:', metadata.project_notes);
+    console.log('phone:', metadata.phone);
+    console.log('project_type:', metadata.project_type);
+    console.log('email:', metadata.email);
+    console.log('uuid:', metadata.uuid);
+    
     const response = await axios.post('https://api.retellai.com/v2/create-phone-call', {
       from_number: '+17252092232',
       to_number: leadData.phone,
       agent_id: process.env.RETELL_AGENT_ID,
-      metadata: {
-        railway_lead_id: railwayLeadId,
-        ghl_contact_id: ghlContactId,
-        uuid: uuid,
-        first_name: leadData.name.split(' ')[0],
-        last_name: leadData.name.split(' ').slice(1).join(' ') || '',
-        full_name: leadData.name,
-        phone: leadData.phone,
-        email: leadData.email || '',
-        project_type: leadData.project_type || 'General Inquiry',
-        project_notes: leadData.project_notes || 'Lead inquiry',
-        full_address: leadData.full_address || 'Address to be confirmed',
-        calendar_availability: JSON.stringify(leadData.availability || []),
-        calendar_provider: 'Google Calendar'
-      }
+      metadata: metadata
     }, {
       headers: {
         'Authorization': `Bearer ${process.env.RETELL_API_KEY}`,
