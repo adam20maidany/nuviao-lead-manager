@@ -30,10 +30,12 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Function to create GHL contact via API
+// Fixed GHL Contact Creation Function
 async function createGHLContact(leadData) {
   try {
     console.log(`📋 Creating GHL contact for ${leadData.name}`);
+    console.log('🔍 API Key Check:', process.env.GHL_API_KEY ? 'SET (length: ' + process.env.GHL_API_KEY.length + ')' : 'MISSING');
+    console.log('🔍 Location ID Check:', process.env.GHL_LOCATION_ID ? 'SET' : 'MISSING');
 
     const nameParts = leadData.name.split(' ');
     const contactData = {
@@ -41,34 +43,112 @@ async function createGHLContact(leadData) {
       lastName: nameParts.slice(1).join(' ') || '',
       phone: leadData.phone,
       email: leadData.email || '',
-      source: leadData.source,
-      tags: ['AI Calling', 'Railway Import'],
-      locationId: process.env.GHL_LOCATION_ID
+      source: leadData.source || 'Railway Import',
+      tags: ['AI Calling', 'Railway Import']
     };
 
     console.log('📤 Sending to GHL API:', contactData);
+    console.log('🌐 API Endpoint: https://services.leadconnectorhq.com/contacts/');
+    console.log('📍 Location ID:', process.env.GHL_LOCATION_ID);
 
-    const response = await axios.post(
-      'https://services.leadconnectorhq.com/contacts/',
-      contactData,
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-          'Version': '2021-07-28',
-          'Content-Type': 'application/json'
+    // Try the newer GHL API format first
+    const headers = {
+      'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+      'Version': '2021-07-28',
+      'Content-Type': 'application/json'
+    };
+
+    console.log('📋 Request Headers:', {
+      'Authorization': 'Bearer [HIDDEN]',
+      'Version': headers.Version,
+      'Content-Type': headers['Content-Type']
+    });
+
+    let response;
+    
+    try {
+      // Method 1: Try with locationId in body
+      const bodyWithLocation = {
+        ...contactData,
+        locationId: process.env.GHL_LOCATION_ID
+      };
+
+      console.log('🔄 Attempting Method 1: locationId in body');
+      response = await axios.post(
+        'https://services.leadconnectorhq.com/contacts/',
+        bodyWithLocation,
+        { headers }
+      );
+      
+    } catch (error1) {
+      console.log('❌ Method 1 failed:', error1.response?.status, error1.response?.data?.message);
+      
+      try {
+        // Method 2: Try with locationId in query params
+        console.log('🔄 Attempting Method 2: locationId in query params');
+        response = await axios.post(
+          `https://services.leadconnectorhq.com/contacts/?locationId=${process.env.GHL_LOCATION_ID}`,
+          contactData,
+          { headers }
+        );
+        
+      } catch (error2) {
+        console.log('❌ Method 2 failed:', error2.response?.status, error2.response?.data?.message);
+        
+        try {
+          // Method 3: Try the v2 API endpoint
+          console.log('🔄 Attempting Method 3: v2 API endpoint');
+          const v2Headers = {
+            'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+            'Content-Type': 'application/json'
+          };
+          
+          response = await axios.post(
+            `https://services.leadconnectorhq.com/contacts/`,
+            {
+              ...contactData,
+              locationId: process.env.GHL_LOCATION_ID
+            },
+            { headers: v2Headers }
+          );
+          
+        } catch (error3) {
+          console.log('❌ Method 3 failed:', error3.response?.status, error3.response?.data?.message);
+          
+          // Method 4: Try alternative endpoint format
+          console.log('🔄 Attempting Method 4: Alternative endpoint');
+          const altHeaders = {
+            'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          };
+          
+          response = await axios.post(
+            `https://rest.gohighlevel.com/v1/contacts/`,
+            {
+              ...contactData,
+              locationId: process.env.GHL_LOCATION_ID
+            },
+            { headers: altHeaders }
+          );
         }
       }
-    );
+    }
 
-    console.log(`✅ GHL contact created successfully: ${response.data.contact.id}`);
+    console.log(`✅ GHL contact created successfully: ${response.data.contact?.id || response.data.id}`);
     return response.data;
 
   } catch (error) {
-    console.error('❌ GHL contact creation failed:', error.response?.data || error.message);
+    console.error('❌ All GHL contact creation methods failed');
+    console.error('Final error status:', error.response?.status);
+    console.error('Final error data:', error.response?.data);
+    console.error('Error message:', error.message);
     
-    if (error.response) {
-      console.error('Response status:', error.response.status);
-      console.error('Response data:', error.response.data);
+    // Log the actual API key format for debugging (first/last 4 chars only)
+    if (process.env.GHL_API_KEY) {
+      const key = process.env.GHL_API_KEY;
+      console.log('🔍 API Key format check:', key.substring(0, 4) + '...' + key.substring(key.length - 4));
+      console.log('🔍 API Key starts with:', key.substring(0, 10));
     }
     
     return null;
