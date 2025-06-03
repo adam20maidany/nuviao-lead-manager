@@ -8,7 +8,148 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Import Google Calendar integration
-const { getAuthUrl, getTokensFromCode, checkAvailabilityWithGoogle, bookAppointmentWithGoogle } = require('./google-calendar');
+const { getAuthUrl, getTokensFromCode, checkAvailabilityWithGoogle, bookAppointmentWithGoogle }
+
+// RETELL WEBHOOK
+app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
+  try {
+    console.log('🤖 Retell webhook received:', req.body.event_type);
+    
+    if (req.body.event_type === 'call_ended') {
+      const { call_id, call_analysis, metadata } = req.body;
+      
+      let outcome = 'no_answer';
+      if (call_analysis?.summary) {
+        const summary = call_analysis.summary.toLowerCase();
+        if (summary.includes('appointment') || summary.includes('scheduled') || summary.includes('booked')) {
+          outcome = 'booked';
+        } else if (summary.includes('not interested') || summary.includes('no thank you')) {
+          outcome = 'dead';
+        } else if (summary.includes('call back') || summary.includes('later')) {
+          outcome = 'follow_up';
+        } else {
+          outcome = 'follow_up';
+        }
+      }
+      
+      console.log(`📞 Call ${call_id} ended with outcome: ${outcome}`);
+      
+      // Record call outcome for AI learning
+      if (metadata?.uuid && global.supabase) {
+        try {
+          // Get lead ID from UUID
+          const { data: lead } = await global.supabase
+            .from('leads')
+            .select('id')
+            .eq('custom_fields->uuid', metadata.uuid)
+            .single();
+          
+          if (lead) {
+            await recordCall(lead.id, {
+              callTime: new Date().toISOString(),
+              outcome: outcome,
+              duration: req.body.call_duration || 0,
+              notes: call_analysis?.summary || ''
+            });
+
+            // If call failed, schedule smart callbacks
+            const callbackTriggers = ['no_answer', 'follow_up'];
+            if (callbackTriggers.includes(outcome)) {
+              await initializeCallback(lead.id, outcome);
+              console.log(`🧠 Smart callbacks scheduled for lead ${lead.id}`);
+            }
+          }
+        } catch (error) {
+          console.error('❌ Failed to process call outcome for AI:', error);
+        }
+      }
+      
+      if (outcome === 'booked') {
+        console.log('🎉 Appointment was booked during call via Google Calendar!');
+      }
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Retell webhook error:', error);
+    res.status(500).json({ error: 'Failed to process call outcome' });
+  }
+});
+
+// Test Google Calendar integration
+app.get('/webhook/test-google-calendar', async (req, res) => {
+  try {
+    if (!googleTokens) {
+      return res.json({
+        success: false,
+        error: 'Google Calendar not authorized yet',
+        authUrl: getAuthUrl(),
+        message: 'Visit the authUrl to authorize Google Calendar access first'
+      });
+    }
+    
+    console.log('🧪 Testing Google Calendar integration...');
+    const availability = await checkAvailabilityWithGoogle(googleTokens, 3);
+    
+    res.json({
+      message: 'Google Calendar integration test',
+      availability: availability,
+      timestamp: new Date().toISOString(),
+      authorized: true
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Google Calendar test failed',
+      details: error.message,
+      authorized: !!googleTokens
+    });
+  }
+});
+
+// Function to create GHL contact via API
+async function createGHLContact(leadData) {
+  try {
+    console.log(`📋 Creating GHL contact for ${leadData.name}`);
+
+    const nameParts = leadData.name.split(' ');
+    const contactData = {
+      firstName: nameParts[0] || '',
+      lastName: nameParts.slice(1).join(' ') || '',
+      phone: leadData.phone,
+      email: leadData.email || '',
+      source: leadData.source,
+      tags: ['AI Calling', 'Railway Import'],
+      locationId: process.env.GHL_LOCATION_ID
+    };
+
+    console.log('📤 Sending to GHL API:', contactData);
+
+    const response = await axios.post(
+      'https://services.leadconnectorhq.com/contacts/',
+      contactData,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Version': '2021-07-28',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    console.log(`✅ GHL contact created successfully: ${response.data.contact.id}`);
+    return response.data;
+
+  } catch (error) {
+    console.error('❌ GHL contact creation failed:', error.response?.data || error.message);
+    
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response data:', error.response.data);
+    }
+    
+    return null;
+  }
+} = require('./google-calendar');
 
 // Import Smart Callback Algorithm
 const { SmartCallbackPredictor, initializeCallback, getOptimalCallTimes, recordCall } = require('./smart-callback-algorithm');
@@ -154,6 +295,8 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
 
 app.post('/webhook/check-availability/bestbuyremodel', async (req, res) => {
   try {
+    console.log('📅 Check availability called:', req.body);
+    
     const { args } = req.body;
     const appointment_date = args?.appointment_date;
     
@@ -161,14 +304,57 @@ app.post('/webhook/check-availability/bestbuyremodel', async (req, res) => {
       return res.json({ result: 'Could you please specify which date you would like to check?' });
     }
 
-    res.json({ result: 'I have availability on that date at 9 AM, 10 AM, 2 PM, and 3 PM. Which works best?' });
+    if (googleTokens) {
+      // Create GHL contact via API
+    let ghlContact = null;
+    if (process.env.GHL_API_KEY && process.env.GHL_LOCATION_ID) {
+      ghlContact = await createGHLContact(leadData);
+    }
+
+    // Check Google Calendar availability for specific date
+      const availability = await checkAvailabilityWithGoogle(googleTokens, 7);
+      
+      if (availability.success) {
+        const requestedDate = new Date(appointment_date);
+        const availableDay = availability.availability.find(day => {
+          const dayDate = new Date(day.date);
+          return dayDate.toDateString() === requestedDate.toDateString();
+        });
+
+        if (availableDay && availableDay.slots.length > 0) {
+          const slotsText = availableDay.slots.map(slot => slot.displayTime).join(', ');
+          res.json({
+            result: `Great! I have availability on ${requestedDate.toLocaleDateString('en-US', { 
+              weekday: 'long', 
+              month: 'long', 
+              day: 'numeric' 
+            })} at these times: ${slotsText}. Which time works best for you?`
+          });
+        } else {
+          res.json({
+            result: `I don't have any availability on ${requestedDate.toLocaleDateString('en-US', { 
+              weekday: 'long', 
+              month: 'long', 
+              day: 'numeric' 
+            })}. Would you like me to check another date?`
+          });
+        }
+      } else {
+        res.json({ result: 'Let me check our schedule and get back to you on availability.' });
+      }
+    } else {
+      res.json({ result: 'I have availability on that date at 9 AM, 10 AM, 2 PM, and 3 PM. Which works best?' });
+    }
   } catch (error) {
+    console.error('❌ Check availability error:', error);
     res.json({ result: 'Let me check our schedule and get back to you.' });
   }
 });
 
 app.post('/webhook/update-phone/bestbuyremodel', async (req, res) => {
   try {
+    console.log('📞 Update phone called:', req.body);
+    
     const { call, args } = req.body;
     const uuid = call?.metadata?.uuid;
     const phone = args?.phone;
@@ -177,31 +363,51 @@ app.post('/webhook/update-phone/bestbuyremodel', async (req, res) => {
       return res.json({ result: 'I need your phone number to update our records.' });
     }
 
-    res.json({ result: 'Perfect! I have updated your phone number in our system.' });
+    if (global.supabase) {
+      const { error } = await global.supabase
+        .from('leads')
+        .update({ phone: phone })
+        .eq('custom_fields->uuid', uuid);
+      
+      if (error) {
+        console.error('Database update error:', error);
+        res.json({ result: 'I noted your phone number and our team will update our records.' });
+      } else {
+        res.json({ result: 'Perfect! I have updated your phone number in our system.' });
+      }
+    } else {
+      res.json({ result: 'Perfect! I have updated your phone number in our system.' });
+    }
   } catch (error) {
+    console.error('❌ Update phone error:', error);
     res.json({ result: 'I have noted your phone number.' });
   }
 });
 
 app.post('/webhook/validate-address/bestbuyremodel', async (req, res) => {
   try {
+    console.log('📍 Validate address called:', req.body);
+    
     const { args } = req.body;
     const address = args?.address;
     
     if (!address) {
-      return res.json({ result: 'Could you please provide your address?' });
+      return res.json({ result: 'Could you please provide your address so I can verify we service your area?' });
     }
 
+    // Simple validation - check if it contains Las Vegas area
     const isLasVegas = address.toLowerCase().includes('las vegas') || 
                       address.toLowerCase().includes('henderson') ||
-                      address.toLowerCase().includes('summerlin');
+                      address.toLowerCase().includes('summerlin') ||
+                      /89\d{3}/.test(address); // Las Vegas ZIP codes
 
     if (isLasVegas) {
-      res.json({ result: 'Excellent! Your address is within our service area.' });
+      res.json({ result: 'Excellent! Your address is within our service area. We will be able to provide you with a free in-home estimate.' });
     } else {
-      res.json({ result: 'Your address appears to be outside our service area.' });
+      res.json({ result: 'I apologize, but your address appears to be outside our current service area. We primarily serve Las Vegas, Henderson, and Summerlin.' });
     }
   } catch (error) {
+    console.error('❌ Validate address error:', error);
     res.json({ result: 'Let me verify your service area.' });
   }
 });
@@ -420,14 +626,18 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
     }
 
     // Initiate AI call
-    const callResult = await initiateAICall(leadData, savedLead?.id, null, savedLead?.custom_fields?.uuid);
+    const callResult = await initiateAICall(leadData, savedLead?.id, ghlContact?.contact?.id, savedLead?.custom_fields?.uuid);
     
     res.json({ 
       success: true, 
-      message: 'Lead processed and AI call initiated',
+      message: 'Lead processed, GHL contact created, calendar checked, and AI call initiated',
       railway_lead_id: savedLead?.id,
+      ghl_contact_id: ghlContact?.contact?.id,
       call_id: callResult.call_id,
-      uuid: savedLead?.custom_fields?.uuid
+      uuid: savedLead?.custom_fields?.uuid,
+      ghl_contact_created: !!ghlContact,
+      calendar_authorized: !!googleTokens,
+      availability_slots: availability.success ? availability.availability.length : 0
     });
 
   } catch (error) {
