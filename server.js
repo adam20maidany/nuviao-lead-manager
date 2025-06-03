@@ -30,12 +30,11 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Fixed GHL Contact Creation Function
+// Optimized GHL Contact Creation for Private Integration Token (PIT)
 async function createGHLContact(leadData) {
   try {
-    console.log(`📋 Creating GHL contact for ${leadData.name}`);
-    console.log('🔍 API Key Check:', process.env.GHL_API_KEY ? 'SET (length: ' + process.env.GHL_API_KEY.length + ')' : 'MISSING');
-    console.log('🔍 Location ID Check:', process.env.GHL_LOCATION_ID ? 'SET' : 'MISSING');
+    console.log(`📋 Creating GHL contact for ${leadData.name} using Private Integration Token`);
+    console.log('🔍 Using PIT token:', process.env.GHL_API_KEY?.substring(0, 8) + '...');
 
     const nameParts = leadData.name.split(' ');
     const contactData = {
@@ -45,115 +44,89 @@ async function createGHLContact(leadData) {
       email: leadData.email || '',
       source: leadData.source || 'Railway Import',
       tags: ['AI Calling', 'Railway Import']
+      // locationId is automatically handled by PIT token
     };
 
-    console.log('📤 Sending to GHL API:', contactData);
-    console.log('🌐 API Endpoint: https://services.leadconnectorhq.com/contacts/');
-    console.log('📍 Location ID:', process.env.GHL_LOCATION_ID);
+    console.log('📤 Sending to GHL API with PIT token:', contactData);
 
-    // Try the newer GHL API format first
-    const headers = {
-      'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-      'Version': '2021-07-28',
-      'Content-Type': 'application/json'
-    };
-
-    console.log('📋 Request Headers:', {
-      'Authorization': 'Bearer [HIDDEN]',
-      'Version': headers.Version,
-      'Content-Type': headers['Content-Type']
-    });
-
-    let response;
-    
-    try {
-      // Method 1: Try with locationId in body
-      const bodyWithLocation = {
-        ...contactData,
-        locationId: process.env.GHL_LOCATION_ID
-      };
-
-      console.log('🔄 Attempting Method 1: locationId in body');
-      response = await axios.post(
-        'https://services.leadconnectorhq.com/contacts/',
-        bodyWithLocation,
-        { headers }
-      );
-      
-    } catch (error1) {
-      console.log('❌ Method 1 failed:', error1.response?.status, error1.response?.data?.message);
-      
-      try {
-        // Method 2: Try with locationId in query params
-        console.log('🔄 Attempting Method 2: locationId in query params');
-        response = await axios.post(
-          `https://services.leadconnectorhq.com/contacts/?locationId=${process.env.GHL_LOCATION_ID}`,
-          contactData,
-          { headers }
-        );
-        
-      } catch (error2) {
-        console.log('❌ Method 2 failed:', error2.response?.status, error2.response?.data?.message);
-        
-        try {
-          // Method 3: Try the v2 API endpoint
-          console.log('🔄 Attempting Method 3: v2 API endpoint');
-          const v2Headers = {
-            'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-            'Content-Type': 'application/json'
-          };
-          
-          response = await axios.post(
-            `https://services.leadconnectorhq.com/contacts/`,
-            {
-              ...contactData,
-              locationId: process.env.GHL_LOCATION_ID
-            },
-            { headers: v2Headers }
-          );
-          
-        } catch (error3) {
-          console.log('❌ Method 3 failed:', error3.response?.status, error3.response?.data?.message);
-          
-          // Method 4: Try alternative endpoint format
-          console.log('🔄 Attempting Method 4: Alternative endpoint');
-          const altHeaders = {
-            'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          };
-          
-          response = await axios.post(
-            `https://rest.gohighlevel.com/v1/contacts/`,
-            {
-              ...contactData,
-              locationId: process.env.GHL_LOCATION_ID
-            },
-            { headers: altHeaders }
-          );
+    const response = await axios.post(
+      'https://services.leadconnectorhq.com/contacts/',
+      contactData,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Version': '2021-07-28',
+          'Content-Type': 'application/json'
         }
       }
-    }
+    );
 
-    console.log(`✅ GHL contact created successfully: ${response.data.contact?.id || response.data.id}`);
+    console.log(`✅ GHL contact created successfully with PIT: ${response.data.contact?.id || response.data.id}`);
+    console.log('📋 Contact details:', response.data.contact || response.data);
+    
     return response.data;
 
   } catch (error) {
-    console.error('❌ All GHL contact creation methods failed');
-    console.error('Final error status:', error.response?.status);
-    console.error('Final error data:', error.response?.data);
-    console.error('Error message:', error.message);
+    console.error('❌ GHL PIT contact creation failed');
+    console.error('Status:', error.response?.status);
+    console.error('Error Details:', error.response?.data);
     
-    // Log the actual API key format for debugging (first/last 4 chars only)
-    if (process.env.GHL_API_KEY) {
-      const key = process.env.GHL_API_KEY;
-      console.log('🔍 API Key format check:', key.substring(0, 4) + '...' + key.substring(key.length - 4));
-      console.log('🔍 API Key starts with:', key.substring(0, 10));
+    // Specific error handling for PIT tokens
+    if (error.response?.status === 401) {
+      console.error('🚨 PIT Token Authentication Failed');
+      console.error('💡 Verify the Private Integration Token is correct');
+      console.error('💡 Check that the integration has contacts.write permission');
+    } else if (error.response?.status === 403) {
+      console.error('🚨 PIT Token Permission Denied');
+      console.error('💡 Enable contacts.write scope in Private Integration settings');
+    } else if (error.response?.status === 422) {
+      console.error('🚨 Data Validation Error');
+      console.error('💡 Check required fields: phone number format, email format');
     }
     
     return null;
   }
 }
+
+// Add this debug endpoint to test PIT token
+app.get('/debug/test-pit-token', async (req, res) => {
+  try {
+    console.log('🧪 Testing Private Integration Token...');
+    
+    // Test the PIT token with a simple API call
+    const response = await axios.get(
+      'https://services.leadconnectorhq.com/contacts/?limit=1',
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Version': '2021-07-28',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    res.json({
+      success: true,
+      message: 'PIT token is working!',
+      token_prefix: process.env.GHL_API_KEY?.substring(0, 8) + '...',
+      api_response: 'Connected successfully',
+      contacts_found: response.data.contacts?.length || 0
+    });
+    
+  } catch (error) {
+    res.json({
+      success: false,
+      error_status: error.response?.status,
+      error_message: error.response?.data,
+      token_prefix: process.env.GHL_API_KEY?.substring(0, 8) + '...',
+      troubleshooting: {
+        if_401: 'PIT token is invalid or expired',
+        if_403: 'PIT token lacks required permissions (contacts.read/write)',
+        solution: 'Check Private Integration settings in GHL'
+      }
+    });
+  }
+});
 
 // Google Calendar OAuth
 app.get('/auth/google', (req, res) => {
