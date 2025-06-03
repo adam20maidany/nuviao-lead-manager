@@ -253,14 +253,22 @@ app.post('/webhook/update-callback-outcome/bestbuyremodel', async (req, res) => 
   }
 });
 
+// ================================
+// 🚀 RETELL CUSTOM FUNCTIONS (FIXED)
+// ================================
+
 // 1. Schedule Lead (Google Calendar Integration)
 app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
   try {
     console.log('📅 Schedule Lead called:', req.body);
     
-    const { UUID, chosen_appointment_slot, additional_information } = req.body;
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const chosen_appointment_slot = args?.chosen_appointment_slot;
+    const additional_information = args?.additional_information;
     
-    if (!UUID || !chosen_appointment_slot) {
+    if (!uuid || !chosen_appointment_slot) {
       return res.status(400).json({
         success: false,
         error: 'Missing required fields: UUID and chosen_appointment_slot'
@@ -272,22 +280,22 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
     const endDate = new Date(appointmentDate);
     endDate.setHours(endDate.getHours() + 1);
 
-    // Get lead information from database or construct from UUID
+    // Get lead information from metadata or database
     let leadInfo = {
-      clientName: 'Lead ' + UUID.substring(0, 8),
-      clientPhone: 'Unknown',
-      clientEmail: 'unknown@email.com',
+      clientName: call?.metadata?.full_name || 'Lead ' + uuid.substring(0, 8),
+      clientPhone: call?.metadata?.phone || 'Unknown',
+      clientEmail: call?.metadata?.email || 'unknown@email.com',
       homeAddress: 'Address to be confirmed',
       estimateType: 'General Estimate'
     };
 
-    // Try to get lead info from Supabase
+    // Try to get additional lead info from Supabase
     if (global.supabase) {
       try {
         const { data, error } = await global.supabase
           .from('leads')
           .select('*')
-          .eq('custom_fields->uuid', UUID)
+          .eq('custom_fields->uuid', uuid)
           .single();
         
         if (data) {
@@ -318,15 +326,6 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
       if (bookingResult.success) {
         console.log(`✅ Google Calendar appointment booked for ${leadInfo.clientName}`);
         
-        // 🆕 Record successful appointment booking in call history
-        await recordCall(leadId || UUID, {
-          callTime: new Date().toISOString(),
-          outcome: 'appointment_booked',
-          duration: 0,
-          attemptNumber: 1,
-          notes: `Appointment booked: ${appointmentDate.toLocaleString()}`
-        });
-        
         // Update lead status in database
         if (global.supabase) {
           try {
@@ -336,38 +335,30 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
                 status: 'appointment_booked',
                 appointment_time: appointmentDate.toISOString()
               })
-              .eq('custom_fields->uuid', UUID);
+              .eq('custom_fields->uuid', uuid);
           } catch (dbError) {
             console.error('Failed to update lead status:', dbError);
           }
         }
 
         res.json({
-          success: true,
-          message: 'Appointment scheduled successfully',
-          appointment_id: bookingResult.appointmentId,
-          calendar_link: bookingResult.calendarLink
+          result: `Appointment scheduled successfully for ${appointmentDate.toLocaleString()} with ${leadInfo.clientName}`
         });
       } else {
-        res.status(500).json({
-          success: false,
-          error: 'Failed to book appointment: ' + bookingResult.error
+        res.json({
+          result: 'Failed to book appointment: ' + bookingResult.error
         });
       }
     } else {
-      // Fallback: Mark as scheduled but manual calendar entry needed
       res.json({
-        success: true,
-        message: 'Appointment scheduled - manual calendar entry required',
-        note: 'Google Calendar not authorized'
+        result: 'Appointment noted - Google Calendar not authorized'
       });
     }
 
   } catch (error) {
     console.error('❌ Schedule lead error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to schedule appointment'
+    res.json({
+      result: 'Failed to schedule appointment'
     });
   }
 });
@@ -377,12 +368,12 @@ app.post('/webhook/check-availability/bestbuyremodel', async (req, res) => {
   try {
     console.log('📅 Check availability called:', req.body);
     
-    const { appointment_date } = req.body;
+    const { args } = req.body;
+    const appointment_date = args?.appointment_date;
     
     if (!appointment_date) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required field: appointment_date'
+      return res.json({
+        result: 'Please provide a date to check availability'
       });
     }
 
@@ -399,43 +390,30 @@ app.post('/webhook/check-availability/bestbuyremodel', async (req, res) => {
         });
 
         if (availableDay && availableDay.slots.length > 0) {
+          const slotsText = availableDay.slots.map(slot => slot.displayTime).join(', ');
           res.json({
-            success: true,
-            date: appointment_date,
-            available_slots: availableDay.slots.map(slot => slot.displayTime),
-            slots_count: availableDay.slots.length
+            result: `Available times on ${appointment_date}: ${slotsText}`
           });
         } else {
           res.json({
-            success: true,
-            date: appointment_date,
-            available_slots: [],
-            slots_count: 0,
-            message: 'No availability on this date'
+            result: `No availability on ${appointment_date}. Please choose another date.`
           });
         }
       } else {
-        res.status(500).json({
-          success: false,
-          error: 'Failed to check calendar availability'
+        res.json({
+          result: 'Unable to check calendar availability'
         });
       }
     } else {
-      // Fallback: Return generic availability
       res.json({
-        success: true,
-        date: appointment_date,
-        available_slots: ['9:00 AM', '10:00 AM', '11:00 AM', '2:00 PM', '3:00 PM'],
-        slots_count: 5,
-        note: 'Generic availability - Google Calendar not authorized'
+        result: `Available times on ${appointment_date}: 9:00 AM, 10:00 AM, 11:00 AM, 2:00 PM, 3:00 PM`
       });
     }
 
   } catch (error) {
     console.error('❌ Check availability error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to check availability'
+    res.json({
+      result: 'Failed to check availability'
     });
   }
 });
@@ -445,12 +423,14 @@ app.post('/webhook/update-phone/bestbuyremodel', async (req, res) => {
   try {
     console.log('📞 Update phone called:', req.body);
     
-    const { uuid, phone } = req.body;
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const phone = args?.phone;
     
     if (!uuid || !phone) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: uuid and phone'
+      return res.json({
+        result: 'Missing information to update phone number'
       });
     }
 
@@ -462,17 +442,17 @@ app.post('/webhook/update-phone/bestbuyremodel', async (req, res) => {
       
       if (error) {
         console.error('Database update error:', error);
-        res.status(500).json({ success: false, error: 'Database update failed' });
+        res.json({ result: 'Failed to update phone number in database' });
       } else {
-        res.json({ success: true, message: 'Phone number updated successfully' });
+        res.json({ result: 'Phone number updated successfully' });
       }
     } else {
-      res.json({ success: true, message: 'Phone number update noted' });
+      res.json({ result: 'Phone number update noted' });
     }
 
   } catch (error) {
     console.error('❌ Update phone error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update phone number' });
+    res.json({ result: 'Failed to update phone number' });
   }
 });
 
@@ -481,12 +461,12 @@ app.post('/webhook/validate-address/bestbuyremodel', async (req, res) => {
   try {
     console.log('📍 Validate address called:', req.body);
     
-    const { address } = req.body;
+    const { args } = req.body;
+    const address = args?.address;
     
     if (!address) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required field: address'
+      return res.json({
+        result: 'Please provide an address to validate'
       });
     }
 
@@ -498,23 +478,17 @@ app.post('/webhook/validate-address/bestbuyremodel', async (req, res) => {
 
     if (isLasVegas) {
       res.json({
-        success: true,
-        valid: true,
-        message: 'Address is within service area',
-        corrected_address: address
+        result: 'Address is within our service area'
       });
     } else {
       res.json({
-        success: true,
-        valid: false,
-        message: 'Address is outside service area',
-        service_area: 'Las Vegas, Henderson, Summerlin area'
+        result: 'Address is outside our service area. We serve Las Vegas, Henderson, and Summerlin areas.'
       });
     }
 
   } catch (error) {
     console.error('❌ Validate address error:', error);
-    res.status(500).json({ success: false, error: 'Failed to validate address' });
+    res.json({ result: 'Failed to validate address' });
   }
 });
 
@@ -523,16 +497,18 @@ app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
   try {
     console.log('⏰ Call back later called:', req.body);
     
-    const { uuid, proposed_callback_time } = req.body;
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const proposed_callback_time = args?.proposed_callback_time;
     
     if (!uuid) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required field: uuid'
+      return res.json({
+        result: 'Unable to schedule callback - missing lead information'
       });
     }
 
-    // 🆕 Get lead ID from UUID
+    // Get lead ID from UUID
     let leadId = null;
     if (global.supabase) {
       const { data } = await global.supabase
@@ -543,7 +519,7 @@ app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
       leadId = data?.id;
     }
 
-    // 🆕 Record the callback request and schedule smart callbacks
+    // Record the callback request and schedule smart callbacks
     if (leadId) {
       await recordCall(leadId, {
         callTime: new Date().toISOString(),
@@ -571,14 +547,12 @@ app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
     }
 
     res.json({
-      success: true,
-      message: 'Smart callbacks scheduled successfully',
-      callback_time: proposed_callback_time
+      result: `Smart callbacks scheduled successfully. We'll call you back soon!`
     });
 
   } catch (error) {
     console.error('❌ Call back later error:', error);
-    res.status(500).json({ success: false, error: 'Failed to schedule callback' });
+    res.json({ result: 'Failed to schedule callback' });
   }
 });
 
@@ -587,12 +561,13 @@ app.post('/webhook/mark-wrong-number/bestbuyremodel', async (req, res) => {
   try {
     console.log('❌ Mark wrong number called:', req.body);
     
-    const { uuid } = req.body;
+    // Extract from call metadata
+    const { call } = req.body;
+    const uuid = call?.metadata?.uuid;
     
     if (!uuid) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required field: uuid'
+      return res.json({
+        result: 'Unable to mark wrong number - missing lead information'
       });
     }
 
@@ -608,13 +583,12 @@ app.post('/webhook/mark-wrong-number/bestbuyremodel', async (req, res) => {
     }
 
     res.json({
-      success: true,
-      message: 'Lead marked as wrong number'
+      result: 'Lead marked as wrong number'
     });
 
   } catch (error) {
     console.error('❌ Mark wrong number error:', error);
-    res.status(500).json({ success: false, error: 'Failed to mark wrong number' });
+    res.json({ result: 'Failed to mark wrong number' });
   }
 });
 
@@ -623,12 +597,17 @@ app.post('/webhook/update-address/bestbuyremodel', async (req, res) => {
   try {
     console.log('📍 Update address called:', req.body);
     
-    const { uuid, address, city, state, zip } = req.body;
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const address = args?.address;
+    const city = args?.city;
+    const state = args?.state;
+    const zip = args?.zip;
     
     if (!uuid || !address || !city || !state || !zip) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: uuid, address, city, state, zip'
+      return res.json({
+        result: 'Missing address information to update'
       });
     }
 
@@ -650,21 +629,19 @@ app.post('/webhook/update-address/bestbuyremodel', async (req, res) => {
       
       if (error) {
         console.error('Database update error:', error);
-        res.status(500).json({ success: false, error: 'Database update failed' });
+        res.json({ result: 'Failed to update address in database' });
       } else {
         res.json({ 
-          success: true, 
-          message: 'Address updated successfully',
-          full_address: fullAddress
+          result: `Address updated successfully: ${fullAddress}`
         });
       }
     } else {
-      res.json({ success: true, message: 'Address update noted' });
+      res.json({ result: 'Address update noted' });
     }
 
   } catch (error) {
     console.error('❌ Update address error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update address' });
+    res.json({ result: 'Failed to update address' });
   }
 });
 
@@ -673,12 +650,13 @@ app.post('/webhook/mobile-home/bestbuyremodel', async (req, res) => {
   try {
     console.log('🏠 Mobile home called:', req.body);
     
-    const { uuid } = req.body;
+    // Extract from call metadata
+    const { call } = req.body;
+    const uuid = call?.metadata?.uuid;
     
     if (!uuid) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required field: uuid'
+      return res.json({
+        result: 'Unable to process mobile home status - missing lead information'
       });
     }
 
@@ -694,13 +672,12 @@ app.post('/webhook/mobile-home/bestbuyremodel', async (req, res) => {
     }
 
     res.json({
-      success: true,
-      message: 'Lead marked as mobile home - project declined'
+      result: 'Unfortunately, we do not service mobile or manufactured homes'
     });
 
   } catch (error) {
     console.error('❌ Mobile home error:', error);
-    res.status(500).json({ success: false, error: 'Failed to mark mobile home' });
+    res.json({ result: 'Failed to process mobile home status' });
   }
 });
 
@@ -709,12 +686,13 @@ app.post('/webhook/outside-area/bestbuyremodel', async (req, res) => {
   try {
     console.log('🌍 Outside area called:', req.body);
     
-    const { uuid } = req.body;
+    // Extract from call metadata
+    const { call } = req.body;
+    const uuid = call?.metadata?.uuid;
     
     if (!uuid) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required field: uuid'
+      return res.json({
+        result: 'Unable to process service area status - missing lead information'
       });
     }
 
@@ -730,13 +708,12 @@ app.post('/webhook/outside-area/bestbuyremodel', async (req, res) => {
     }
 
     res.json({
-      success: true,
-      message: 'Lead marked as outside service area'
+      result: 'Unfortunately, your location is outside our service area'
     });
 
   } catch (error) {
     console.error('❌ Outside area error:', error);
-    res.status(500).json({ success: false, error: 'Failed to mark outside area' });
+    res.json({ result: 'Failed to process service area status' });
   }
 });
 
@@ -745,12 +722,13 @@ app.post('/webhook/not-interested/bestbuyremodel', async (req, res) => {
   try {
     console.log('❌ Not interested called:', req.body);
     
-    const { uuid } = req.body;
+    // Extract from call metadata
+    const { call } = req.body;
+    const uuid = call?.metadata?.uuid;
     
     if (!uuid) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required field: uuid'
+      return res.json({
+        result: 'Unable to process interest status - missing lead information'
       });
     }
 
@@ -766,13 +744,12 @@ app.post('/webhook/not-interested/bestbuyremodel', async (req, res) => {
     }
 
     res.json({
-      success: true,
-      message: 'Lead marked as not interested'
+      result: 'Thank you for your time. We understand you are not interested at this time.'
     });
 
   } catch (error) {
     console.error('❌ Not interested error:', error);
-    res.status(500).json({ success: false, error: 'Failed to mark not interested' });
+    res.json({ result: 'Failed to process interest status' });
   }
 });
 
@@ -782,14 +759,12 @@ app.post('/webhook/transfer-call/bestbuyremodel', async (req, res) => {
     console.log('📞 Transfer call requested:', req.body);
     
     res.json({
-      success: true,
-      message: 'Call transfer initiated',
-      transfer_number: '+17252092232' // Best Buy Remodel main number
+      result: 'Transferring you to a human representative now'
     });
 
   } catch (error) {
     console.error('❌ Transfer call error:', error);
-    res.status(500).json({ success: false, error: 'Failed to transfer call' });
+    res.json({ result: 'Failed to transfer call' });
   }
 });
 
@@ -798,12 +773,14 @@ app.post('/webhook/update-first-name/bestbuyremodel', async (req, res) => {
   try {
     console.log('👤 Update first name called:', req.body);
     
-    const { uuid, first_name } = req.body;
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const first_name = args?.first_name;
     
     if (!uuid || !first_name) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: uuid and first_name'
+      return res.json({
+        result: 'Missing information to update first name'
       });
     }
 
@@ -830,21 +807,19 @@ app.post('/webhook/update-first-name/bestbuyremodel', async (req, res) => {
       
       if (error) {
         console.error('Database update error:', error);
-        res.status(500).json({ success: false, error: 'Database update failed' });
+        res.json({ result: 'Failed to update first name in database' });
       } else {
         res.json({ 
-          success: true, 
-          message: 'First name updated successfully',
-          new_name: newFullName
+          result: `First name updated successfully to ${first_name}`
         });
       }
     } else {
-      res.json({ success: true, message: 'First name update noted' });
+      res.json({ result: 'First name update noted' });
     }
 
   } catch (error) {
     console.error('❌ Update first name error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update first name' });
+    res.json({ result: 'Failed to update first name' });
   }
 });
 
@@ -853,12 +828,14 @@ app.post('/webhook/update-last-name/bestbuyremodel', async (req, res) => {
   try {
     console.log('👤 Update last name called:', req.body);
     
-    const { uuid, last_name } = req.body;
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const last_name = args?.last_name;
     
     if (!uuid || !last_name) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: uuid and last_name'
+      return res.json({
+        result: 'Missing information to update last name'
       });
     }
 
@@ -883,21 +860,19 @@ app.post('/webhook/update-last-name/bestbuyremodel', async (req, res) => {
       
       if (error) {
         console.error('Database update error:', error);
-        res.status(500).json({ success: false, error: 'Database update failed' });
+        res.json({ result: 'Failed to update last name in database' });
       } else {
         res.json({ 
-          success: true, 
-          message: 'Last name updated successfully',
-          new_name: newFullName
+          result: `Last name updated successfully to ${last_name}`
         });
       }
     } else {
-      res.json({ success: true, message: 'Last name update noted' });
+      res.json({ result: 'Last name update noted' });
     }
 
   } catch (error) {
     console.error('❌ Update last name error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update last name' });
+    res.json({ result: 'Failed to update last name' });
   }
 });
 
@@ -906,12 +881,14 @@ app.post('/webhook/update-email/bestbuyremodel', async (req, res) => {
   try {
     console.log('📧 Update email called:', req.body);
     
-    const { uuid, email } = req.body;
+    // Extract from call metadata and function args
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const email = args?.email;
     
     if (!uuid || !email) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: uuid and email'
+      return res.json({
+        result: 'Missing information to update email'
       });
     }
 
@@ -923,17 +900,17 @@ app.post('/webhook/update-email/bestbuyremodel', async (req, res) => {
       
       if (error) {
         console.error('Database update error:', error);
-        res.status(500).json({ success: false, error: 'Database update failed' });
+        res.json({ result: 'Failed to update email in database' });
       } else {
-        res.json({ success: true, message: 'Email updated successfully' });
+        res.json({ result: 'Email updated successfully' });
       }
     } else {
-      res.json({ success: true, message: 'Email update noted' });
+      res.json({ result: 'Email update noted' });
     }
 
   } catch (error) {
     console.error('❌ Update email error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update email' });
+    res.json({ result: 'Failed to update email' });
   }
 });
 
@@ -942,14 +919,16 @@ app.post('/webhook/end-call/bestbuyremodel', async (req, res) => {
   try {
     console.log('📞 End call called:', req.body);
     
+    const { args } = req.body;
+    const execution_message = args?.execution_message || 'Thank you for your time. Have a great day!';
+    
     res.json({
-      success: true,
-      message: 'Call ended successfully'
+      result: execution_message
     });
 
   } catch (error) {
     console.error('❌ End call error:', error);
-    res.status(500).json({ success: false, error: 'Failed to end call' });
+    res.json({ result: 'Call ended' });
   }
 });
 
