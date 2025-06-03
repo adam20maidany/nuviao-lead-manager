@@ -8,7 +8,129 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Import Google Calendar integration
-const { getAuthUrl, getTokensFromCode, checkAvailabilityWithGoogle, bookAppointmentWithGoogle }
+const { getAuthUrl, getTokensFromCode, checkAvailabilityWithGoogle, bookAppointmentWithGoogle } = require('./google-calendar');
+
+// Import Smart Callback Algorithm
+const { SmartCallbackPredictor, initializeCallback, getOptimalCallTimes, recordCall } = require('./smart-callback-algorithm');
+
+// Store Google tokens temporarily
+let googleTokens = null;
+
+// Initialize Supabase
+let supabase = null;
+if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
+  const { createClient } = require('@supabase/supabase-js');
+  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+  console.log('✅ Supabase initialized');
+  global.supabase = supabase;
+}
+
+// Middleware
+app.use(helmet());
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+
+// Function to create GHL contact via API
+async function createGHLContact(leadData) {
+  try {
+    console.log(`📋 Creating GHL contact for ${leadData.name}`);
+
+    const nameParts = leadData.name.split(' ');
+    const contactData = {
+      firstName: nameParts[0] || '',
+      lastName: nameParts.slice(1).join(' ') || '',
+      phone: leadData.phone,
+      email: leadData.email || '',
+      source: leadData.source,
+      tags: ['AI Calling', 'Railway Import'],
+      locationId: process.env.GHL_LOCATION_ID
+    };
+
+    console.log('📤 Sending to GHL API:', contactData);
+
+    const response = await axios.post(
+      'https://services.leadconnectorhq.com/contacts/',
+      contactData,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Version': '2021-07-28',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    console.log(`✅ GHL contact created successfully: ${response.data.contact.id}`);
+    return response.data;
+
+  } catch (error) {
+    console.error('❌ GHL contact creation failed:', error.response?.data || error.message);
+    
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response data:', error.response.data);
+    }
+    
+    return null;
+  }
+}
+
+// Google Calendar OAuth
+app.get('/auth/google', (req, res) => {
+  try {
+    const authUrl = getAuthUrl();
+    res.json({ success: true, authUrl: authUrl });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/auth/google/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).send('Authorization code not provided');
+  
+  try {
+    const result = await getTokensFromCode(code);
+    if (result.success) {
+      googleTokens = result.tokens;
+      res.send('<h1>✅ Google Calendar Authorization Successful!</h1><script>window.close();</script>');
+    } else {
+      res.status(500).send('Authorization failed: ' + result.error);
+    }
+  } catch (error) {
+    res.status(500).send('Authorization error: ' + error.message);
+  }
+});
+
+// Test Google Calendar integration
+app.get('/webhook/test-google-calendar', async (req, res) => {
+  try {
+    if (!googleTokens) {
+      return res.json({
+        success: false,
+        error: 'Google Calendar not authorized yet',
+        authUrl: getAuthUrl(),
+        message: 'Visit the authUrl to authorize Google Calendar access first'
+      });
+    }
+    
+    console.log('🧪 Testing Google Calendar integration...');
+    const availability = await checkAvailabilityWithGoogle(googleTokens, 3);
+    
+    res.json({
+      message: 'Google Calendar integration test',
+      availability: availability,
+      timestamp: new Date().toISOString(),
+      authorized: true
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Google Calendar test failed',
+      details: error.message,
+      authorized: !!googleTokens
+    });
+  }
+});
 
 // RETELL WEBHOOK
 app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
@@ -76,128 +198,6 @@ app.post('/webhook/retell/bestbuyremodel', async (req, res) => {
   }
 });
 
-// Test Google Calendar integration
-app.get('/webhook/test-google-calendar', async (req, res) => {
-  try {
-    if (!googleTokens) {
-      return res.json({
-        success: false,
-        error: 'Google Calendar not authorized yet',
-        authUrl: getAuthUrl(),
-        message: 'Visit the authUrl to authorize Google Calendar access first'
-      });
-    }
-    
-    console.log('🧪 Testing Google Calendar integration...');
-    const availability = await checkAvailabilityWithGoogle(googleTokens, 3);
-    
-    res.json({
-      message: 'Google Calendar integration test',
-      availability: availability,
-      timestamp: new Date().toISOString(),
-      authorized: true
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Google Calendar test failed',
-      details: error.message,
-      authorized: !!googleTokens
-    });
-  }
-});
-
-// Function to create GHL contact via API
-async function createGHLContact(leadData) {
-  try {
-    console.log(`📋 Creating GHL contact for ${leadData.name}`);
-
-    const nameParts = leadData.name.split(' ');
-    const contactData = {
-      firstName: nameParts[0] || '',
-      lastName: nameParts.slice(1).join(' ') || '',
-      phone: leadData.phone,
-      email: leadData.email || '',
-      source: leadData.source,
-      tags: ['AI Calling', 'Railway Import'],
-      locationId: process.env.GHL_LOCATION_ID
-    };
-
-    console.log('📤 Sending to GHL API:', contactData);
-
-    const response = await axios.post(
-      'https://services.leadconnectorhq.com/contacts/',
-      contactData,
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-          'Version': '2021-07-28',
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    console.log(`✅ GHL contact created successfully: ${response.data.contact.id}`);
-    return response.data;
-
-  } catch (error) {
-    console.error('❌ GHL contact creation failed:', error.response?.data || error.message);
-    
-    if (error.response) {
-      console.error('Response status:', error.response.status);
-      console.error('Response data:', error.response.data);
-    }
-    
-    return null;
-  }
-} = require('./google-calendar');
-
-// Import Smart Callback Algorithm
-const { SmartCallbackPredictor, initializeCallback, getOptimalCallTimes, recordCall } = require('./smart-callback-algorithm');
-
-// Store Google tokens temporarily
-let googleTokens = null;
-
-// Initialize Supabase
-let supabase = null;
-if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
-  const { createClient } = require('@supabase/supabase-js');
-  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-  console.log('✅ Supabase initialized');
-  global.supabase = supabase;
-}
-
-// Middleware
-app.use(helmet());
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-
-// Google Calendar OAuth
-app.get('/auth/google', (req, res) => {
-  try {
-    const authUrl = getAuthUrl();
-    res.json({ success: true, authUrl: authUrl });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.get('/auth/google/callback', async (req, res) => {
-  const { code } = req.query;
-  if (!code) return res.status(400).send('Authorization code not provided');
-  
-  try {
-    const result = await getTokensFromCode(code);
-    if (result.success) {
-      googleTokens = result.tokens;
-      res.send('<h1>✅ Google Calendar Authorization Successful!</h1><script>window.close();</script>');
-    } else {
-      res.status(500).send('Authorization failed: ' + result.error);
-    }
-  } catch (error) {
-    res.status(500).send('Authorization error: ' + error.message);
-  }
-});
-
 // Retell Custom Functions
 app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
   try {
@@ -205,6 +205,9 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
     const uuid = call?.metadata?.uuid;
     const chosen_appointment_slot = args?.chosen_appointment_slot;
     const additional_information = args?.additional_information;
+    
+    console.log('📅 Schedule lead called with metadata:', call?.metadata);
+    console.log('📅 Schedule args:', args);
     
     if (!uuid || !chosen_appointment_slot) {
       return res.json({ result: 'Missing information to schedule appointment' });
@@ -215,7 +218,7 @@ app.post('/webhook/schedule-lead/bestbuyremodel', async (req, res) => {
     endDate.setHours(endDate.getHours() + 1);
 
     let leadInfo = {
-      clientName: call?.metadata?.full_name || 'Lead',
+      clientName: call?.metadata?.full_name || call?.metadata?.first_name || 'Lead',
       clientPhone: call?.metadata?.phone || 'Unknown',
       clientEmail: call?.metadata?.email || 'unknown@email.com',
       homeAddress: call?.metadata?.full_address || 'Address to be confirmed',
@@ -297,21 +300,17 @@ app.post('/webhook/check-availability/bestbuyremodel', async (req, res) => {
   try {
     console.log('📅 Check availability called:', req.body);
     
-    const { args } = req.body;
+    const { call, args } = req.body;
     const appointment_date = args?.appointment_date;
+    
+    console.log('📅 Availability metadata:', call?.metadata);
     
     if (!appointment_date) {
       return res.json({ result: 'Could you please specify which date you would like to check?' });
     }
 
     if (googleTokens) {
-      // Create GHL contact via API
-    let ghlContact = null;
-    if (process.env.GHL_API_KEY && process.env.GHL_LOCATION_ID) {
-      ghlContact = await createGHLContact(leadData);
-    }
-
-    // Check Google Calendar availability for specific date
+      // Check Google Calendar availability for specific date
       const availability = await checkAvailabilityWithGoogle(googleTokens, 7);
       
       if (availability.success) {
@@ -388,8 +387,10 @@ app.post('/webhook/validate-address/bestbuyremodel', async (req, res) => {
   try {
     console.log('📍 Validate address called:', req.body);
     
-    const { args } = req.body;
+    const { call, args } = req.body;
     const address = args?.address;
+    
+    console.log('📍 Address metadata:', call?.metadata);
     
     if (!address) {
       return res.json({ result: 'Could you please provide your address so I can verify we service your area?' });
@@ -417,6 +418,8 @@ app.post('/webhook/call-back-later/bestbuyremodel', async (req, res) => {
     const { call, args } = req.body;
     const uuid = call?.metadata?.uuid;
     const proposed_callback_time = args?.proposed_callback_time;
+    
+    console.log('📞 Callback metadata:', call?.metadata);
     
     // Get lead ID for smart callback scheduling
     let leadId = null;
@@ -460,6 +463,24 @@ app.post('/webhook/mark-wrong-number/bestbuyremodel', async (req, res) => {
 
 app.post('/webhook/update-address/bestbuyremodel', async (req, res) => {
   try {
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const address = args?.address;
+    
+    console.log('🏠 Update address metadata:', call?.metadata);
+    
+    if (global.supabase && uuid && address) {
+      await global.supabase
+        .from('leads')
+        .update({ 
+          custom_fields: {
+            ...call?.metadata,
+            full_address: address
+          }
+        })
+        .eq('custom_fields->uuid', uuid);
+    }
+    
     res.json({ result: 'Perfect! I have updated your address in our system.' });
   } catch (error) {
     res.json({ result: 'I have noted your address.' });
@@ -484,6 +505,17 @@ app.post('/webhook/outside-area/bestbuyremodel', async (req, res) => {
 
 app.post('/webhook/not-interested/bestbuyremodel', async (req, res) => {
   try {
+    const { call } = req.body;
+    const uuid = call?.metadata?.uuid;
+    
+    // Mark lead as not interested in database
+    if (global.supabase && uuid) {
+      await global.supabase
+        .from('leads')
+        .update({ status: 'not_interested' })
+        .eq('custom_fields->uuid', uuid);
+    }
+    
     res.json({ result: 'I completely understand. Thank you for your time!' });
   } catch (error) {
     res.json({ result: 'Thank you for your time!' });
@@ -500,6 +532,22 @@ app.post('/webhook/transfer-call/bestbuyremodel', async (req, res) => {
 
 app.post('/webhook/update-first-name/bestbuyremodel', async (req, res) => {
   try {
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const first_name = args?.first_name;
+    
+    if (global.supabase && uuid && first_name) {
+      await global.supabase
+        .from('leads')
+        .update({ 
+          custom_fields: {
+            ...call?.metadata,
+            first_name: first_name
+          }
+        })
+        .eq('custom_fields->uuid', uuid);
+    }
+    
     res.json({ result: 'Perfect! I have updated your first name.' });
   } catch (error) {
     res.json({ result: 'I have noted your first name.' });
@@ -508,6 +556,22 @@ app.post('/webhook/update-first-name/bestbuyremodel', async (req, res) => {
 
 app.post('/webhook/update-last-name/bestbuyremodel', async (req, res) => {
   try {
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const last_name = args?.last_name;
+    
+    if (global.supabase && uuid && last_name) {
+      await global.supabase
+        .from('leads')
+        .update({ 
+          custom_fields: {
+            ...call?.metadata,
+            last_name: last_name
+          }
+        })
+        .eq('custom_fields->uuid', uuid);
+    }
+    
     res.json({ result: 'Perfect! I have updated your last name.' });
   } catch (error) {
     res.json({ result: 'I have noted your last name.' });
@@ -516,6 +580,23 @@ app.post('/webhook/update-last-name/bestbuyremodel', async (req, res) => {
 
 app.post('/webhook/update-email/bestbuyremodel', async (req, res) => {
   try {
+    const { call, args } = req.body;
+    const uuid = call?.metadata?.uuid;
+    const email = args?.email;
+    
+    if (global.supabase && uuid && email) {
+      await global.supabase
+        .from('leads')
+        .update({ 
+          email: email,
+          custom_fields: {
+            ...call?.metadata,
+            email: email
+          }
+        })
+        .eq('custom_fields->uuid', uuid);
+    }
+    
     res.json({ result: 'Perfect! I have updated your email address.' });
   } catch (error) {
     res.json({ result: 'I have noted your email address.' });
@@ -553,6 +634,12 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
     }
 
     console.log(`📞 Processing lead: ${leadData.name} - ${leadData.phone}`);
+
+    // Create GHL contact via API
+    let ghlContact = null;
+    if (process.env.GHL_API_KEY && process.env.GHL_LOCATION_ID) {
+      ghlContact = await createGHLContact(leadData);
+    }
 
     let savedLead = null;
     if (global.supabase) {
@@ -655,29 +742,33 @@ async function initiateAICall(leadData, railwayLeadId, ghlContactId, uuid) {
 
     console.log(`📞 Calling Retell AI for ${leadData.name} at ${leadData.phone}`);
     
+    // FIXED: Ensure all metadata fields are strings
     const metadata = {
-      railway_lead_id: railwayLeadId,
-      ghl_contact_id: ghlContactId,
-      uuid: uuid,
-      first_name: leadData.name.split(' ')[0],
-      last_name: leadData.name.split(' ').slice(1).join(' ') || '',
-      full_address: leadData.full_address || 'Address to be confirmed',
-      project_notes: leadData.project_notes || 'Lead inquiry',
-      phone: leadData.phone,
-      project_type: leadData.project_type || 'General Inquiry', 
-      email: leadData.email || '',
-      full_name: leadData.name,
+      railway_lead_id: String(railwayLeadId || ''),
+      ghl_contact_id: String(ghlContactId || ''),
+      uuid: String(uuid || ''),
+      first_name: String(leadData.name.split(' ')[0] || ''),
+      last_name: String(leadData.name.split(' ').slice(1).join(' ') || ''),
+      full_name: String(leadData.name || ''),
+      phone: String(leadData.phone || ''),
+      email: String(leadData.email || ''),
+      full_address: String(leadData.full_address || 'Address to be confirmed'),
+      project_type: String(leadData.project_type || 'General Inquiry'),
+      project_notes: String(leadData.project_notes || 'Lead inquiry'),
       calendar_availability: JSON.stringify(leadData.availability || []),
       calendar_provider: 'Google Calendar'
     };
     
     console.log('🚀 METADATA BEING SENT TO CARL:');
-    console.log('first_name:', metadata.first_name);
-    console.log('last_name:', metadata.last_name);
-    console.log('phone:', metadata.phone);
-    console.log('email:', metadata.email);
-    console.log('project_type:', metadata.project_type);
-    console.log('uuid:', metadata.uuid);
+    console.log('📝 first_name:', metadata.first_name);
+    console.log('📝 last_name:', metadata.last_name);
+    console.log('📝 full_name:', metadata.full_name);
+    console.log('📝 phone:', metadata.phone);
+    console.log('📝 email:', metadata.email);
+    console.log('📝 project_type:', metadata.project_type);
+    console.log('📝 project_notes:', metadata.project_notes);
+    console.log('📝 full_address:', metadata.full_address);
+    console.log('📝 uuid:', metadata.uuid);
     
     const response = await axios.post('https://api.retellai.com/v2/create-phone-call', {
       from_number: '+17252092232',
@@ -790,6 +881,14 @@ app.get('/', (req, res) => {
     <p>Status: ✅ Online</p>
     <p>Google Calendar Auth: ${googleTokens ? '✅ Authorized' : '❌ Not Authorized'}</p>
     ${!googleTokens ? '<p><a href="/auth/google">Authorize Google Calendar</a></p>' : ''}
+    <h2>System Status:</h2>
+    <ul>
+      <li>Database: ${global.supabase ? '✅' : '❌'} ${global.supabase ? 'Connected' : 'Not Connected'}</li>
+      <li>Retell API: ${process.env.RETELL_API_KEY ? '✅' : '❌'} ${process.env.RETELL_API_KEY ? 'Configured' : 'Not Configured'}</li>
+      <li>GHL API: ${process.env.GHL_API_KEY ? '✅' : '❌'} ${process.env.GHL_API_KEY ? 'Configured' : 'Not Configured'}</li>
+      <li>Functions Active: ✅ 15 Retell Functions</li>
+      <li>Smart Callbacks: ✅ AI Algorithm Active</li>
+    </ul>
   `);
 });
 
@@ -797,6 +896,8 @@ app.listen(PORT, () => {
   console.log(`🚀 Nuviao Bridge running on port ${PORT}`);
   console.log(`📅 Google Calendar integration enabled!`);
   console.log(`🤖 Retell AI functions: 15 endpoints active`);
+  console.log(`🧠 Smart callback algorithm: Active`);
+  console.log(`💾 Database: ${global.supabase ? 'Connected' : 'Not Connected'}`);
   
   if (!googleTokens) {
     console.log(`⚠️ Google Calendar NOT AUTHORIZED - Visit /auth/google to authorize`);
@@ -804,4 +905,11 @@ app.listen(PORT, () => {
   } else {
     console.log(`✅ Google Calendar AUTHORIZED and ready!`);
   }
+  
+  // Log environment check
+  console.log(`🔐 Environment Check:`);
+  console.log(`   - RETELL_API_KEY: ${process.env.RETELL_API_KEY ? '✅ Set' : '❌ Missing'}`);
+  console.log(`   - RETELL_AGENT_ID: ${process.env.RETELL_AGENT_ID ? '✅ Set' : '❌ Missing'}`);
+  console.log(`   - GHL_API_KEY: ${process.env.GHL_API_KEY ? '✅ Set' : '❌ Missing'}`);
+  console.log(`   - SUPABASE_URL: ${process.env.SUPABASE_URL ? '✅ Set' : '❌ Missing'}`);
 });
