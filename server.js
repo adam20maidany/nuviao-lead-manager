@@ -30,11 +30,51 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Optimized GHL Contact Creation for Private Integration Token (PIT)
-async function createGHLContact(leadData) {
+// Test PIT token without specifying location ID
+app.get('/debug/test-pit-no-location', async (req, res) => {
   try {
-    console.log(`📋 Creating GHL contact for ${leadData.name} using Private Integration Token`);
-    console.log('🔍 Using PIT token:', process.env.GHL_API_KEY?.substring(0, 8) + '...');
+    console.log('🧪 Testing PIT token without location ID...');
+    
+    // Test 1: Try to get contacts without location filter
+    const response = await axios.get(
+      'https://services.leadconnectorhq.com/contacts/?limit=5',
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Version': '2021-07-28',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    res.json({
+      success: true,
+      message: 'PIT token works without location ID!',
+      contacts_found: response.data.contacts?.length || 0,
+      test_result: 'PIT token has automatic location access',
+      next_step: 'Try creating contact without location ID'
+    });
+    
+  } catch (error) {
+    console.error('❌ PIT token test failed:', error.response?.data);
+    
+    res.json({
+      success: false,
+      error_status: error.response?.status,
+      error_message: error.response?.data,
+      troubleshooting: {
+        check_1: 'Verify Private Integration was created in correct sub-account',
+        check_2: 'Confirm integration has contacts.read and contacts.write permissions',
+        check_3: 'Make sure you copied the token correctly'
+      }
+    });
+  }
+});
+
+// Updated contact creation function - try without location ID
+async function createGHLContactWithPIT(leadData) {
+  try {
+    console.log(`📋 Creating GHL contact for ${leadData.name} using PIT (no location ID)`);
 
     const nameParts = leadData.name.split(' ');
     const contactData = {
@@ -44,10 +84,10 @@ async function createGHLContact(leadData) {
       email: leadData.email || '',
       source: leadData.source || 'Railway Import',
       tags: ['AI Calling', 'Railway Import']
-      // locationId is automatically handled by PIT token
+      // Removed locationId - PIT token should handle this automatically
     };
 
-    console.log('📤 Sending to GHL API with PIT token:', contactData);
+    console.log('📤 Sending to GHL API with PIT (no location):', contactData);
 
     const response = await axios.post(
       'https://services.leadconnectorhq.com/contacts/',
@@ -61,72 +101,14 @@ async function createGHLContact(leadData) {
       }
     );
 
-    console.log(`✅ GHL contact created successfully with PIT: ${response.data.contact?.id || response.data.id}`);
-    console.log('📋 Contact details:', response.data.contact || response.data);
-    
+    console.log(`✅ GHL contact created with PIT: ${response.data.contact?.id || response.data.id}`);
     return response.data;
 
   } catch (error) {
-    console.error('❌ GHL PIT contact creation failed');
-    console.error('Status:', error.response?.status);
-    console.error('Error Details:', error.response?.data);
-    
-    // Specific error handling for PIT tokens
-    if (error.response?.status === 401) {
-      console.error('🚨 PIT Token Authentication Failed');
-      console.error('💡 Verify the Private Integration Token is correct');
-      console.error('💡 Check that the integration has contacts.write permission');
-    } else if (error.response?.status === 403) {
-      console.error('🚨 PIT Token Permission Denied');
-      console.error('💡 Enable contacts.write scope in Private Integration settings');
-    } else if (error.response?.status === 422) {
-      console.error('🚨 Data Validation Error');
-      console.error('💡 Check required fields: phone number format, email format');
-    }
-    
+    console.error('❌ PIT contact creation failed (no location):', error.response?.data);
     return null;
   }
 }
-
-// Add this debug endpoint to test PIT token
-app.get('/debug/test-pit-token', async (req, res) => {
-  try {
-    console.log('🧪 Testing Private Integration Token...');
-    
-    // Test the PIT token with a simple API call
-    const response = await axios.get(
-      'https://services.leadconnectorhq.com/contacts/?limit=1',
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-          'Version': '2021-07-28',
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    res.json({
-      success: true,
-      message: 'PIT token is working!',
-      token_prefix: process.env.GHL_API_KEY?.substring(0, 8) + '...',
-      api_response: 'Connected successfully',
-      contacts_found: response.data.contacts?.length || 0
-    });
-    
-  } catch (error) {
-    res.json({
-      success: false,
-      error_status: error.response?.status,
-      error_message: error.response?.data,
-      token_prefix: process.env.GHL_API_KEY?.substring(0, 8) + '...',
-      troubleshooting: {
-        if_401: 'PIT token is invalid or expired',
-        if_403: 'PIT token lacks required permissions (contacts.read/write)',
-        solution: 'Check Private Integration settings in GHL'
-      }
-    });
-  }
-});
 
 // Google Calendar OAuth
 app.get('/auth/google', (req, res) => {
