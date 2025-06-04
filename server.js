@@ -774,6 +774,7 @@ app.post('/webhook/end-call/bestbuyremodel', async (req, res) => {
 // GHL BRIDGE WEBHOOK (MAIN ENTRY POINT)
 // ========================================
 
+// Enhanced GHL Bridge - Complete Workflow
 app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
   try {
     console.log('🔗 GHL Bridge received data:', req.body);
@@ -795,12 +796,12 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
 
     console.log(`📞 Processing lead: ${leadData.name} - ${leadData.phone}`);
 
-    // Create GHL contact via Private Integration Token
-    let ghlContact = null;
-    if (process.env.GHL_API_KEY) {
-      ghlContact = await createGHLContact(leadData);
-    }
+    // Step 1: Create GHL contact via webhook (WORKING!)
+    console.log('📋 Step 1: Creating GHL contact...');
+    const ghlContact = await createGHLContact(leadData);
 
+    // Step 2: Save to Supabase database
+    console.log('💾 Step 2: Saving to database...');
     let savedLead = null;
     if (global.supabase) {
       try {
@@ -854,13 +855,102 @@ app.post('/webhook/ghl-bridge/bestbuyremodel', async (req, res) => {
 
           if (data) {
             savedLead = data;
-            console.log(`✅ Lead saved to Railway database: ID ${savedLead.id}`);
+            console.log(`✅ Lead saved to database: ID ${savedLead.id}`);
           }
         }
       } catch (dbError) {
         console.error('Database operation failed:', dbError);
       }
     }
+
+    // Step 3: Trigger AI call with database metadata
+    console.log('🤖 Step 3: Triggering AI call...');
+    let callResult = { success: false };
+    if (savedLead) {
+      // Delay AI call by 3 seconds to ensure everything is saved
+      setTimeout(() => {
+        triggerAICallFromDatabase(savedLead.id);
+      }, 3000);
+      
+      callResult = { success: true, queued: true };
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Complete workflow executed: GHL contact → Database → AI call queued',
+      steps_completed: {
+        ghl_contact_created: !!ghlContact,
+        database_saved: !!savedLead,
+        ai_call_queued: callResult.success
+      },
+      railway_lead_id: savedLead?.id,
+      uuid: savedLead?.custom_fields?.uuid,
+      call_status: 'queued_for_3_seconds'
+    });
+
+  } catch (error) {
+    console.error('❌ GHL Bridge error:', error);
+    res.status(500).json({ error: 'Failed to process complete workflow' });
+  }
+});
+
+// Add this function after the GHL Bridge
+async function triggerAICallFromDatabase(leadId) {
+  try {
+    console.log(`📞 Triggering AI call for lead ID: ${leadId}`);
+    
+    // Get complete lead data from database
+    const { data: lead, error } = await global.supabase
+      .from('leads')
+      .select('*')
+      .eq('id', leadId)
+      .single();
+    
+    if (!lead) {
+      console.error('❌ Lead not found in database');
+      return;
+    }
+    
+    console.log(`📋 Retrieved lead from database: ${lead.name}`);
+    
+    // Prepare metadata from database
+    const metadata = {
+      railway_lead_id: String(lead.id),
+      uuid: String(lead.custom_fields?.uuid || ''),
+      first_name: String(lead.name.split(' ')[0] || ''),
+      last_name: String(lead.name.split(' ').slice(1).join(' ') || ''),
+      full_name: String(lead.name || ''),
+      phone: String(lead.phone || ''),
+      email: String(lead.email || ''),
+      full_address: String(lead.custom_fields?.full_address || 'Address to be confirmed'),
+      project_type: String(lead.custom_fields?.project_type || 'General Inquiry'),
+      project_notes: String(lead.custom_fields?.project_notes || 'Lead inquiry')
+    };
+    
+    console.log('🚀 METADATA FROM DATABASE FOR CARL:');
+    console.log('📝 first_name:', metadata.first_name);
+    console.log('📝 phone:', metadata.phone);
+    console.log('📝 project_type:', metadata.project_type);
+    
+    // Make the Retell API call
+    const response = await axios.post('https://api.retellai.com/v2/create-phone-call', {
+      from_number: '+17252092232',
+      to_number: lead.phone,
+      agent_id: process.env.RETELL_AGENT_ID,
+      metadata: metadata
+    }, {
+      headers: {
+        'Authorization': `Bearer ${process.env.RETELL_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log(`✅ AI call initiated from database: ${response.data.call_id}`);
+    
+  } catch (error) {
+    console.error('❌ Database-driven AI call failed:', error.response?.data || error.message);
+  }
+}
 
     // Check Google Calendar availability
     let availability = { success: false, availability: [] };
