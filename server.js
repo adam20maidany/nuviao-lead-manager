@@ -947,27 +947,28 @@ async function triggerAICallFromDatabase(leadId) {
 
     console.log(`✅ AI call initiated from database: ${response.data.call_id}`);
     
-  } catch (error) {
+} catch (error) {
     console.error('❌ Database-driven AI call failed:', error.response?.data || error.message);
   }
 }
 
-    // Check Google Calendar availability
-    let availability = { success: false, availability: [] };
-    if (googleTokens) {
-      console.log('📅 Checking Google Calendar availability...');
-      availability = await checkAvailabilityWithGoogle(googleTokens, 7);
-      if (availability.success && availability.availability.length > 0) {
-        leadData.availability = availability.availability;
-      }
-    }
+// ========================================
+// SMART CALLBACK ENDPOINTS
+// ========================================
 
-    // Initiate AI call
-    const callResult = await initiateAICall(leadData, savedLead?.id, ghlContact?.contact?.id, savedLead?.custom_fields?.uuid);
+app.get('/webhook/optimal-call-times/:leadId', async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const daysAhead = parseInt(req.query.days) || 3;
     
-    res.json({ 
-      success: true, 
-      message: 'Lead processed, GHL contact created, calendar checked, and AI call initiated',
+    console.log(`🧠 Getting optimal call times for lead ${leadId}`);
+    
+    const predictor = new SmartCallbackPredictor();
+    const predictions = await predictor.predictOptimalCallTimes(leadId, daysAhead);
+    
+    res.json({
+      success: true,
+      lead_id: leadId,
       railway_lead_id: savedLead?.id,
       ghl_contact_id: ghlContact?.contact?.id || ghlContact?.id,
       call_id: callResult.call_id,
