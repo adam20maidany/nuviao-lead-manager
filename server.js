@@ -34,48 +34,40 @@ app.use(express.json({ limit: '10mb' }));
 // FUNCTION DEFINITIONS (BEFORE ROUTES)
 // ========================================
 
-// Function to create GHL contact via Private Integration Token
+// Updated webhook-based contact creation
 async function createGHLContact(leadData) {
   try {
-    console.log(`📋 Creating GHL contact for ${leadData.name} using Private Integration Token`);
-    console.log('🔍 PIT Token Check:', process.env.GHL_API_KEY ? 'SET' : 'MISSING');
+    console.log(`📋 Creating GHL contact via webhook for ${leadData.name}`);
 
     const nameParts = leadData.name.split(' ');
-    const contactData = {
+    const webhookData = {
       firstName: nameParts[0] || '',
       lastName: nameParts.slice(1).join(' ') || '',
       phone: leadData.phone,
       email: leadData.email || '',
       source: leadData.source || 'Railway Import',
-      tags: ['AI Calling', 'Railway Import']
-      // No locationId needed - PIT token handles this automatically
+      tags: 'AI Calling',
+      projectNotes: leadData.project_notes || leadData.project_type || 'Lead inquiry',
+      address: leadData.full_address || 'Address to be confirmed'
     };
 
-    console.log('📤 Sending to GHL API with PIT token:', contactData);
+    console.log('📤 Sending to GHL webhook:', webhookData);
 
     const response = await axios.post(
-      'https://services.leadconnectorhq.com/contacts/',
-      contactData,
+      'https://services.leadconnectorhq.com/hooks/llj5AyvYH8kun6U6fX84/webhook-trigger/bb07aab7-1781-416b-aecf-a15f2a1f9a9c',
+      webhookData,
       {
         headers: {
-          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-          'Version': '2021-07-28',
           'Content-Type': 'application/json'
         }
       }
     );
 
-    console.log(`✅ GHL contact created successfully: ${response.data.contact?.id || response.data.id}`);
-    return response.data;
+    console.log(`✅ GHL contact created via webhook successfully`);
+    return { success: true, method: 'webhook', response: response.data };
 
   } catch (error) {
-    console.error('❌ GHL contact creation failed:', error.response?.data || error.message);
-    
-    if (error.response) {
-      console.error('Response status:', error.response.status);
-      console.error('Response data:', error.response.data);
-    }
-    
+    console.error('❌ Webhook contact creation failed:', error.response?.data || error.message);
     return null;
   }
 }
